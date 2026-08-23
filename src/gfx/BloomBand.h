@@ -23,9 +23,10 @@
 //   * never do per-pixel work that could be done per row, or per fourth row;
 //   * one aligned 32-bit access beats three byte accesses, every time.
 //
-// A 40-row band is exactly 10 rows of the 90x90, and 360/4 is exactly 90
-// columns, which is why the band height is 40: an accumulator straddling a band
-// boundary would need its own seam handling.
+// The band height must be a multiple of SCALE so a band is a whole number of
+// accumulator rows: an accumulator straddling a band boundary would need its own
+// seam handling. 360/4 is exactly 90 columns, and the renderer's 20-row band is
+// exactly five accumulator rows.
 
 #include <cstdint>
 
@@ -38,7 +39,6 @@ class BloomBand {
   static constexpr int SW = 90;
   static constexpr int SH = 90;
   static constexpr int SCALE = W / SW;  // 4
-  static constexpr int BAND_H = 40;
   static constexpr int PASSES = 3;
   static constexpr int N = SW * SH;
 
@@ -79,7 +79,6 @@ class BloomBand {
   uint32_t accum_[N] = {};  // building, from this frame's bands; doubles as the
                             // blur's scratch, since it is cleared afterwards
                             // anyway - which is what pays for the wider stride
-  uint16_t glow565_[N] = {};  // packed once per frame, for row expansion
   uint32_t acc_[SW] = {};     // one small row, full precision, same layout
   uint16_t glowrow_[W] = {};  // expanded and packed, cached
   int glowrow_sy_ = -1;

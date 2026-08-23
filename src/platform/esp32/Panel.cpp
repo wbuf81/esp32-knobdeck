@@ -17,10 +17,17 @@ constexpr spi_host_device_t HOST = SPI2_HOST;
 // 70 MHz is reported working on this panel by community drivers; 80 is not
 // reliable. Raise only with a test pattern on screen to catch tearing.
 constexpr int CLOCK_HZ = 70000000;
+// Max single SPI transfer. One band is 28,800 bytes.
 constexpr size_t CHUNK_BYTES = 32768;
 
 spi_device_handle_t g_spi = nullptr;
-uint8_t *g_chunk[2] = {nullptr, nullptr};
+// The two band buffers are the ONLY DMA staging memory this driver owns.
+//
+// It used to keep a separate pair of 32 KB chunk buffers for the full-frame
+// path, which together with the bands wanted 121.6 KB of DMA-capable internal
+// SRAM - and once the network and Spotify layers were linked in, that
+// allocation simply failed. The full-frame path now stages through the bands,
+// which it can, because the two are never in use at the same time.
 uint16_t *g_band[2] = {nullptr, nullptr};
 int g_band_slot = 0;
 spi_transaction_t g_trans[2];
@@ -352,23 +359,23 @@ bool panelBegin() {
   const size_t band_bytes =
       static_cast<size_t>(gfx::W) * PANEL_BAND_H * sizeof(uint16_t);
   for (int i = 0; i < 2; ++i) {
-    g_chunk[i] = static_cast<uint8_t *>(
-        heap_caps_malloc(CHUNK_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
-    if (!g_chunk[i]) {
-      Serial.println("panel: DMA staging buffer allocation failed");
-      return false;
-    }
     // Bands must be in internal SRAM: it is DMA-capable, and the measurements
     // put internal writes at 181 MB/s against PSRAM's hard 33 MB/s ceiling.
     g_band[i] = static_cast<uint16_t *>(
         heap_caps_malloc(band_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
     if (!g_band[i]) {
-      Serial.println("panel: internal band buffer allocation failed");
+      Serial.printf(
+          "panel: band buffer %d (%u B, DMA-capable internal) FAILED; "
+          "largest such block is %u B\n",
+          i, (unsigned)band_bytes,
+          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA |
+                                                    MALLOC_CAP_INTERNAL));
       return false;
     }
   }
-  Serial.printf("panel: 2 x %u B band buffers in internal SRAM\n",
-                (unsigned)band_bytes);
+  Serial.printf("panel: 2 x %u B band buffers in internal SRAM (%u B free)\n",
+                (unsigned)band_bytes,
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
   // Hardware reset.
   digitalWrite(pins::LCD_RST, LOW);
@@ -434,18 +441,22 @@ void panelPushFrame(const uint16_t *src) {
   g_inflight = 0;
   g_busy[0] = g_busy[1] = false;
 
-  const size_t chunk_px = CHUNK_BYTES / 2;
+  // Staged through the band buffers rather than through dedicated chunks: this
+  // path and the band path are never active at the same time, and 64 KB of
+  // DMA-capable internal SRAM is far too expensive to reserve for a test
+  // pattern.
+  const size_t chunk_px = static_cast<size_t>(gfx::W) * PANEL_BAND_H;
   size_t left = static_cast<size_t>(gfx::W) * gfx::H;
   int slot = 0;
   while (left) {
     const size_t n = left < chunk_px ? left : chunk_px;
     waitSlot(slot);
-    uint16_t *dst = reinterpret_cast<uint16_t *>(g_chunk[slot]);
+    uint16_t *dst = g_band[slot];
     for (size_t k = 0; k < n; ++k) {
       const uint16_t v = src[k];
       dst[k] = static_cast<uint16_t>((v >> 8) | (v << 8));
     }
-    queueQuad(g_chunk[slot], n * 2, slot);
+    queueQuad(dst, n * 2, slot);
     src += n;
     left -= n;
     slot ^= 1;

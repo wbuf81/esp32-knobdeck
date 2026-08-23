@@ -35,21 +35,29 @@ inline uint32_t pack888(uint8_t r, uint8_t g, uint8_t b) {
 void BloomBand::begin() {
   std::memset(glow_, 0, sizeof(glow_));
   std::memset(accum_, 0, sizeof(accum_));
-  std::memset(glow565_, 0, sizeof(glow565_));
   std::memset(glowrow_, 0, sizeof(glowrow_));
   glowrow_sy_ = -1;
 }
 
 void BloomBand::buildGlowRow(int small_y) {
-  const uint16_t *src = &glow565_[static_cast<size_t>(small_y) * SW];
+  const uint32_t *src = &glow_[static_cast<size_t>(small_y) * SW];
 
   // Nearest horizontally: each small pixel fills four screen pixels, written as
   // two 32-bit stores. Horizontal bilinear was tried and is not worth it - the
   // glow has been through four blur passes, so it varies by very little over
   // four pixels, and this is a soft additive haze rather than an edge.
+  // Packed here rather than held as a second full copy of the glow. A
+  // pre-packed 16 KB buffer was tried and removed: internal SRAM turned out to
+  // be the binding constraint once the network stack was linked in, and 90 packs
+  // per small row is nothing next to that.
   uint32_t *out = reinterpret_cast<uint32_t *>(glowrow_);
   for (int sx = 0; sx < SW; ++sx) {
-    const uint16_t v = fade(src[sx], strength_);
+    const uint32_t g = src[sx];
+    const uint16_t v =
+        fade(rgb565(static_cast<uint8_t>(g & 0xFF),
+                    static_cast<uint8_t>((g >> 8) & 0xFF),
+                    static_cast<uint8_t>((g >> 16) & 0xFF)),
+             strength_);
     const uint32_t vv = (static_cast<uint32_t>(v) << 16) | v;
     out[sx * 2 + 0] = vv;
     out[sx * 2 + 1] = vv;
@@ -136,14 +144,6 @@ void BloomBand::endFrame() {
     for (int x = 0; x < SW; ++x) dst[x] = blur3(a[x], b[x], c[x]);
   }
   std::memcpy(glow_, accum_, sizeof(glow_));
-
-  // Pack once, here, rather than per expanded row.
-  for (int i = 0; i < N; ++i) {
-    const uint32_t v = glow_[i];
-    glow565_[i] = rgb565(static_cast<uint8_t>(v & 0xFF),
-                         static_cast<uint8_t>((v >> 8) & 0xFF),
-                         static_cast<uint8_t>((v >> 16) & 0xFF));
-  }
 
   std::memset(accum_, 0, sizeof(accum_));
   glowrow_sy_ = -1;

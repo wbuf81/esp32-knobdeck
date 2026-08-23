@@ -48,9 +48,16 @@ void panelPushFrame(const uint16_t *native_endian);
 // The address window is set once per frame and the pixel stream is a single
 // CS-low transaction spanning every band.
 
-// Rows per band. 40 divides 360 into nine bands and is exactly ten rows of the
-// 90x90 bloom accumulator, so nothing straddles a boundary.
-constexpr int PANEL_BAND_H = 40;
+// Rows per band.
+//
+// 20 divides 360 into eighteen bands and is exactly five rows of the 90x90 bloom
+// accumulator, so nothing straddles a boundary. It was 40, which worked until
+// the network and Spotify layers were linked in: two 40-row bands need 57.6 KB
+// of DMA-capable internal SRAM, and that left mbedTLS with 13 KB of headroom -
+// enough for the one session it had, and nothing for the second one an artwork
+// download opens. Halving the band height buys 28.8 KB back for the cost of nine
+// more DMA transfers per frame, which are asynchronous anyway.
+constexpr int PANEL_BAND_H = 20;
 
 void panelBeginFrame();
 // Blocks until this band's previous DMA has completed, then returns it to draw

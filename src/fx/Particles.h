@@ -38,7 +38,7 @@ struct SpawnParams {
 
 class Particles {
  public:
-  static constexpr int MAX = 1400;
+  static constexpr int MAX = 1000;
   // Streak length is capped so one very fast particle cannot cost a whole
   // frame; beyond about a dozen steps the eye reads it as a line anyway.
   static constexpr int MAX_STEPS = 14;
