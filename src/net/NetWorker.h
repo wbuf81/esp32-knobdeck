@@ -47,6 +47,12 @@ class NetWorker {
   // UI side: copy the shared state out for rendering.
   AppState snapshot();
 
+  // UI side: the decoded cover for an album, or null. Borrowed, not owned, and
+  // valid until two further album changes - see art/CoverCache.h.
+  const art::Image *cover(const char *album_id) const {
+    return source_.cover(album_id);
+  }
+
   // UI side: the screen went to sleep or woke. Asleep stretches the poll
   // interval; waking forces an immediate poll so the screen never shows stale
   // state after a button press.

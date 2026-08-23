@@ -44,7 +44,8 @@
 namespace {
 
 views::CoverLight g_view;
-art::Image g_cover;
+art::Image g_cover;                       // synthetic fallback
+const art::Image *g_shown_cover = nullptr;  // the live cover currently shown
 audio::AudioAnalyzer g_analyzer;
 audio::Modulation g_mod;
 core::FrameClock g_clock;
@@ -155,6 +156,19 @@ void loop() {
                      st.pb.duration_ms);
   const uint32_t shown_progress = g_progress.value();
 
+  // Real artwork, once the net task has decoded it. The cover is borrowed from
+  // the net task's PSRAM store, so re-checking every frame is how the view picks
+  // it up the moment it lands rather than only on the next track change.
+  if (g_net && st.pb.art_path[0]) {
+    const art::Image *live = g_net->cover(st.pb.art_path);
+    if (live && live != g_shown_cover) {
+      g_shown_cover = live;
+      g_view.setCover(live);
+      Serial.printf("cover: %dx%d live artwork\n", live->width(),
+                    live->height());
+    }
+  }
+
   // A new track reseeds everything derived from it: hue, tempo, particle
   // palette. Deterministic on the id, so a song always looks the same way.
   if (std::strncmp(g_track, st.pb.track_id, ID_LEN) != 0) {
@@ -163,6 +177,10 @@ void loop() {
                                             : fnv1a("first-light");
     g_view.begin(seed);
     g_analyzer.setTrack(seed);
+    // Fall back to the synthetic cover until the real one arrives. The ancestor
+    // notes why this matters: "no artwork" text during the second every uncached
+    // album spends downloading made a working device look broken.
+    g_shown_cover = nullptr;
     if (g_cover.valid()) g_view.setCover(&g_cover);
     Serial.printf("track: %s - %s\n",
                   st.pb.artist[0] ? st.pb.artist : "(none)",

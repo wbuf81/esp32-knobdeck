@@ -77,7 +77,9 @@ SpotifySource::SpotifySource(const char *client_id, const char *client_secret,
     : auth_(client_id, client_secret, refresh_token) {}
 
 void SpotifySource::begin(const std::string &cache_dir) {
-  art_.begin(cache_dir);
+  // cache_dir is unused: covers live in PSRAM, not on a card. Kept in the
+  // signature because the desktop build may yet want a real directory.
+  (void)cache_dir;
 }
 
 bool SpotifySource::authHeaders(std::vector<std::string> *headers,

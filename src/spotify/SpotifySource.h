@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-#include "../art/ArtCache.h"
+#include "../art/CoverCache.h"
 #include "../core/AppState.h"
 #include "../core/Deadline.h"
 #include "../core/CommandQueue.h"
@@ -25,6 +25,12 @@ class SpotifySource {
                 const char *refresh_token);
 
   void begin(const std::string &cache_dir);
+
+  // Render task: the decoded cover for this album, or null. Published under an
+  // atomic by the net task; see art/CoverCache.h for why that is enough.
+  const art::Image *cover(const char *album_id) const {
+    return art_.image(album_id);
+  }
 
   // One iteration: run queued commands, then poll if due. `out` is a scratch
   // state the caller merges under lock — this never touches shared memory.
@@ -55,7 +61,7 @@ class SpotifySource {
   void probeLibraryWrite(AppState *out, uint32_t now_ms);
 
   SpotifyAuth auth_;
-  ArtCache art_;
+  art::CoverCache art_;
 
   std::string last_liked_track_;
   Deadline next_poll_;

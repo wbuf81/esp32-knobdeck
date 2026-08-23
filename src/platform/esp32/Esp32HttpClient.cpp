@@ -280,25 +280,48 @@ bool requestOnce(const char *method, const std::string &url,
 }
 }  // namespace
 
-bool downloadToFile(const std::string &url, const std::string &path) {
-  // Separate instance: mixing the CDN into the API's client would evict its
-  // keep-alive on every album change.
-  // Open the destination BEFORE fetching. The first version did the GET first,
-  // so with unusable storage it downloaded ~30KB every poll and threw it away —
-  // a permanent request storm against Spotify's CDN.
-  const std::string tmp = path + ".part";
-  FILE *f = std::fopen(tmp.c_str(), "wb");
-  if (!f) {
-    NETLOG("cannot open %s for write — skipping download", tmp.c_str());
+// The streamed CDN fetch, with the sink left open.
+//
+// downloadToFile and downloadToMemory share this rather than each carrying a
+// copy. The two deadlines below are load-bearing - their absence wedged the net
+// task solid in the ancestor project - and two copies of a guard like that is
+// how one of them quietly drifts.
+namespace {
+
+// Returns false to abort the download.
+using Sink = bool (*)(void *ctx, const uint8_t *data, size_t n);
+
+struct MemSink {
+  std::vector<uint8_t> *out;
+  size_t cap;
+};
+
+bool fileSink(void *ctx, const uint8_t *data, size_t n) {
+  FILE *f = static_cast<FILE *>(ctx);
+  return std::fwrite(data, 1, n, f) == n;
+}
+
+bool memSink(void *ctx, const uint8_t *data, size_t n) {
+  MemSink *m = static_cast<MemSink *>(ctx);
+  if (m->out->size() + n > m->cap) {
+    NETLOG("artwork exceeds %u byte cap - aborting", (unsigned)m->cap);
     return false;
   }
+  m->out->insert(m->out->end(), data, data + n);
+  return true;
+}
 
+// `written` and `remaining` are reported back so each caller can say why it
+// failed rather than returning a bare false.
+bool streamCdn(const std::string &url, Sink sink, void *ctx, int *written_out,
+               int *declared_out, int *remaining_out) {
   // Spotify hands out https:// image URLs; fetch them over http:// instead.
-  // The CDN serves the same bytes either way — verified: 200 with a correct
-  // Content-Length and no redirect — and this is the whole point of the note
-  // above, so do not quietly "fix" it back to https.
+  // The CDN serves the same bytes either way - verified: 200 with a correct
+  // Content-Length and no redirect - and it means artwork never needs a second
+  // TLS session, which is the constraint the whole net design is built around.
+  // Do not quietly "fix" this back to https.
   std::string plain = url;
-  if (plain.compare(0, 8, "https://") == 0) plain.erase(4, 1);  // https -> http
+  if (plain.compare(0, 8, "https://") == 0) plain.erase(4, 1);
 
   NETLOG("artwork GET %s", plain.c_str());
   NETLOG("  heap: free %lu, largest block %lu",
@@ -307,7 +330,7 @@ bool downloadToFile(const std::string &url, const std::string &path) {
 
   // Re-fetched through cdnHttp() after every reset, never held across one: a
   // reset destroys the HTTPClient along with its client, so a reference taken
-  // beforehand would be dangling.
+  // beforehand would dangle.
   auto configure = [](HTTPClient &c) {
     c.setReuse(true);
     c.setConnectTimeout(5000);
@@ -317,24 +340,19 @@ bool downloadToFile(const std::string &url, const std::string &path) {
   configure(cdnHttp());
   if (!cdnHttp().begin(cdnClient(), plain.c_str())) {
     NETLOG("artwork begin() refused the url");
-    std::fclose(f);
-    std::remove(tmp.c_str());
     resetCdnSession();
     return false;
   }
 
   int code = cdnHttp().GET();
   if (code < 0) {
-    // Reused connection lost the race with the server's idle close. Rebuild
-    // the session and try once more before reporting failure — otherwise this
-    // album gets marked failed and never shows its cover.
-    NETLOG("artwork GET failed (%s) — retrying on a fresh session",
+    // A reused connection lost the race with the server's idle close. Rebuild
+    // and try once more, or this album is marked failed and never shows a cover.
+    NETLOG("artwork GET failed (%s) - retrying on a fresh session",
            HTTPClient::errorToString(code).c_str());
     resetCdnSession();
     configure(cdnHttp());
     if (!cdnHttp().begin(cdnClient(), plain.c_str())) {
-      std::fclose(f);
-      std::remove(tmp.c_str());
       resetCdnSession();
       return false;
     }
@@ -342,26 +360,20 @@ bool downloadToFile(const std::string &url, const std::string &path) {
   }
   if (code != HTTP_CODE_OK) {
     NETLOG("artwork GET -> %d", code);
-    std::fclose(f);
-    std::remove(tmp.c_str());
     resetCdnSession();
     return false;
   }
 
-  // Streamed in small chunks: a 640px cover is tens of KB and must never sit
-  // in heap in one piece on a board with no PSRAM.
-  //
   // Both bounds below are load-bearing, and their absence wedged the net task
   // solid. http.setTimeout() does NOT apply here: it governs HTTPClient's own
-  // reads, and this loop pumps the stream itself. Without a deadline, a CDN
-  // that accepts the connection and then goes quiet spins this loop forever at
-  // delay(1) — the task stays alive, so nothing looks crashed, it simply never
+  // reads, and this loop pumps the stream itself. Without a deadline, a CDN that
+  // accepts the connection and then goes quiet spins this loop forever at
+  // delay(1) - the task stays alive, so nothing looks crashed, it simply never
   // completes another iteration and playback freezes.
   //
   // The connected() test alone is not enough either. On a chunked response
-  // getSize() is -1, and keep-alive holds the socket open after the final
-  // chunk, so connected() stays true with nothing left to read.
-  // Safe to bind now: no reset happens between here and the end of the loop.
+  // getSize() is -1, and keep-alive holds the socket open after the final chunk,
+  // so connected() stays true with nothing left to read.
   HTTPClient &http = cdnHttp();
   WiFiClient *stream = http.getStreamPtr();
   uint8_t buf[1024];
@@ -377,7 +389,7 @@ bool downloadToFile(const std::string &url, const std::string &path) {
   while (remaining != 0) {
     const uint32_t now = millis();
     if (overall.elapsed(now)) {
-      NETLOG("artwork download exceeded %ums — aborting", (unsigned)DL_TOTAL_MS);
+      NETLOG("artwork download exceeded %ums - aborting", (unsigned)DL_TOTAL_MS);
       ok = false;
       break;
     }
@@ -387,7 +399,7 @@ bool downloadToFile(const std::string &url, const std::string &path) {
       // response, truncated for a sized one.
       if (!http.connected()) break;
       if (no_progress.elapsed(now)) {
-        NETLOG("artwork download stalled %ums with %d left — aborting",
+        NETLOG("artwork download stalled %ums with %d left - aborting",
                (unsigned)DL_STALL_MS, remaining);
         ok = false;
         break;
@@ -395,13 +407,14 @@ bool downloadToFile(const std::string &url, const std::string &path) {
       delay(1);
       continue;
     }
-    const int n = stream->readBytes(buf, avail > sizeof(buf) ? sizeof(buf) : avail);
+    const int n =
+        stream->readBytes(buf, avail > sizeof(buf) ? sizeof(buf) : avail);
     if (n <= 0) {
-      NETLOG("artwork read returned %d with %d left — stopping", n, remaining);
+      NETLOG("artwork read returned %d with %d left - stopping", n, remaining);
       break;
     }
-    if (std::fwrite(buf, 1, n, f) != static_cast<size_t>(n)) {
-      NETLOG("artwork write to sd failed after %d bytes", written);
+    if (!sink(ctx, buf, static_cast<size_t>(n))) {
+      NETLOG("artwork sink refused after %d bytes", written);
       ok = false;
       break;
     }
@@ -410,21 +423,38 @@ bool downloadToFile(const std::string &url, const std::string &path) {
     no_progress.arm(millis(), DL_STALL_MS);  // progress resets the stall clock
   }
 
-  std::fclose(f);
-
-  // Close it rather than holding it until the next album. Album changes are
-  // minutes apart, far past the CDN's ~60s idle close, so a held socket would be
-  // dead on arrival and the next download would spend its first attempt finding
-  // that out. Costs nothing to rebuild now that there is no handshake.
+  // Closed rather than held until the next album. Album changes are minutes
+  // apart, far past the CDN's ~60s idle close, so a held socket would be dead on
+  // arrival and the next download would spend its first attempt finding out.
+  // Costs nothing to rebuild now that there is no handshake.
   resetCdnSession();
 
-  // Promote only on success, so a truncated download never becomes a cache
+  if (written_out) *written_out = written;
+  if (declared_out) *declared_out = declared;
+  if (remaining_out) *remaining_out = remaining;
+  return ok && remaining <= 0;
+}
+
+}  // namespace
+
+bool downloadToFile(const std::string &url, const std::string &path) {
+  // Open the destination BEFORE fetching. Doing the GET first meant that with
+  // unusable storage it downloaded ~30KB every poll and threw it away - a
+  // permanent request storm against Spotify's CDN.
+  const std::string tmp = path + ".part";
+  FILE *f = std::fopen(tmp.c_str(), "wb");
+  if (!f) {
+    NETLOG("cannot open %s for write - skipping download", tmp.c_str());
+    return false;
+  }
+
+  int written = 0, declared = 0, remaining = 0;
+  const bool ok = streamCdn(url, fileSink, f, &written, &declared, &remaining);
+  std::fclose(f);
+
+  // Promoted only on success, so a truncated download never becomes a cache
   // entry that fails to decode later.
-  //
-  // Every exit below says why it failed. An earlier version returned false from
-  // three of these paths in silence, so "artwork unavailable" was the only trace
-  // in the log and it named no cause at all.
-  if (ok && remaining <= 0) {
+  if (ok) {
     std::remove(path.c_str());
     if (std::rename(tmp.c_str(), path.c_str()) == 0) return true;
     NETLOG("artwork rename to %s failed after %d bytes", path.c_str(), written);
@@ -432,9 +462,25 @@ bool downloadToFile(const std::string &url, const std::string &path) {
     return false;
   }
 
-  NETLOG("artwork incomplete: %d of %d bytes, %d left, ok=%d", written, declared,
-         remaining, ok ? 1 : 0);
+  NETLOG("artwork incomplete: %d of %d bytes, %d left", written, declared,
+         remaining);
   std::remove(tmp.c_str());
+  return false;
+}
+
+bool downloadToMemory(const std::string &url, std::vector<uint8_t> *out,
+                      size_t max_bytes) {
+  if (!out) return false;
+  out->clear();
+  MemSink sink{out, max_bytes};
+
+  int written = 0, declared = 0, remaining = 0;
+  const bool ok = streamCdn(url, memSink, &sink, &written, &declared, &remaining);
+  if (ok) return true;
+
+  NETLOG("artwork incomplete: %d of %d bytes, %d left", written, declared,
+         remaining);
+  out->clear();
   return false;
 }
 
