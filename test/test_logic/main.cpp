@@ -8,6 +8,7 @@
 
 #include <unity.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
@@ -21,11 +22,15 @@
 #include "gfx/Dither.h"
 #include "gfx/Framebuffer.h"
 #include "art/Image.h"
+#include "audio/Analysis.h"
+#include "audio/AudioAnalyzer.h"
+#include "audio/Fft.h"
 #include "audio/Procedural.h"
 #include "fx/Particles.h"
 #include "gfx/Quad3D.h"
 #include "gfx/Surface.h"
 #include "platform/desktop/FrameDump.h"
+#include "platform/desktop/WavMic.h"
 
 // ---------------------------------------------------------------------------
 // Framebuffer
@@ -746,6 +751,468 @@ void test_procedural_is_marked_not_live(void) {
   TEST_ASSERT_FALSE(m.live);
 }
 
+
+// ---------------------------------------------------------------------------
+// FFT
+//
+// Asserted against analytically known answers at more than one bin, because a
+// twiddle-indexing error is often correct at one frequency and wrong elsewhere.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A unit-amplitude sine landing exactly on bin `k`, so its energy has nowhere
+// to leak.
+void fillSineAtBin(float *buf, int n, int k) {
+  for (int i = 0; i < n; ++i)
+    buf[i] = std::sin(2.0f * 3.14159265f * static_cast<float>(k) *
+                      static_cast<float>(i) / static_cast<float>(n));
+}
+
+int peakBin(const float *mag, int bins) {
+  int best = 0;
+  for (int i = 1; i < bins; ++i)
+    if (mag[i] > mag[best]) best = i;
+  return best;
+}
+
+float meanExcluding(const float *mag, int bins, int skip, int width) {
+  float sum = 0.0f;
+  int n = 0;
+  for (int i = 1; i < bins; ++i) {
+    if (i > skip - width && i < skip + width) continue;
+    sum += mag[i];
+    ++n;
+  }
+  return n ? sum / n : 0.0f;
+}
+
+// A sine at an arbitrary frequency in Hz, for the band tests.
+void fillSineHz(float *buf, int n, float hz, float amp) {
+  for (int i = 0; i < n; ++i)
+    buf[i] = amp * std::sin(2.0f * 3.14159265f * hz *
+                            static_cast<float>(i) /
+                            static_cast<float>(audio::SAMPLE_RATE));
+}
+
+}  // namespace
+
+void test_fft_finds_a_tone_at_bin_32(void) {
+  static audio::Fft fft;
+  static float in[audio::Fft::N];
+  static float mag[audio::Fft::BINS];
+  fillSineAtBin(in, audio::Fft::N, 32);
+  fft.magnitudes(in, mag);
+  TEST_ASSERT_EQUAL_INT(32, peakBin(mag, audio::Fft::BINS));
+  TEST_ASSERT_TRUE(mag[32] > meanExcluding(mag, audio::Fft::BINS, 32, 3) * 20.0f);
+}
+
+void test_fft_finds_a_tone_at_bin_100(void) {
+  // A second frequency, because a twiddle-index error can be exact at one bin.
+  static audio::Fft fft;
+  static float in[audio::Fft::N];
+  static float mag[audio::Fft::BINS];
+  fillSineAtBin(in, audio::Fft::N, 100);
+  fft.magnitudes(in, mag);
+  TEST_ASSERT_EQUAL_INT(100, peakBin(mag, audio::Fft::BINS));
+  TEST_ASSERT_TRUE(mag[100] > meanExcluding(mag, audio::Fft::BINS, 100, 3) * 20.0f);
+}
+
+void test_fft_of_silence_is_silent(void) {
+  static audio::Fft fft;
+  static float in[audio::Fft::N] = {};
+  static float mag[audio::Fft::BINS];
+  fft.magnitudes(in, mag);
+  for (int i = 0; i < audio::Fft::BINS; ++i)
+    TEST_ASSERT_TRUE(mag[i] < 1e-4f);
+}
+
+void test_fft_puts_dc_in_bin_zero(void) {
+  static audio::Fft fft;
+  static float in[audio::Fft::N];
+  static float mag[audio::Fft::BINS];
+  for (int i = 0; i < audio::Fft::N; ++i) in[i] = 1.0f;
+  fft.magnitudes(in, mag);
+  // Windowed DC concentrates at bin 0 with a little in 1-2; nothing beyond.
+  TEST_ASSERT_TRUE(mag[0] > 10.0f);
+  for (int i = 5; i < audio::Fft::BINS; ++i) TEST_ASSERT_TRUE(mag[i] < 1.0f);
+}
+
+void test_fft_has_no_state_between_calls(void) {
+  static audio::Fft fft;
+  static float in[audio::Fft::N];
+  static float a[audio::Fft::BINS], b[audio::Fft::BINS];
+  fillSineAtBin(in, audio::Fft::N, 51);
+  fft.magnitudes(in, a);
+  fft.magnitudes(in, b);
+  for (int i = 0; i < audio::Fft::BINS; ++i)
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, a[i], b[i]);
+}
+
+// ---------------------------------------------------------------------------
+// Band energy
+// ---------------------------------------------------------------------------
+
+void test_bands_separate_low_from_high(void) {
+  // This is the test that catches a frequency-to-bin arithmetic error, which is
+  // otherwise completely invisible: everything still moves, just not with the
+  // right part of the music.
+  static audio::Fft fft;
+  static float in[audio::Fft::N];
+  static float mag[audio::Fft::BINS];
+  audio::BandEnergy be;
+  float bass = 0, mid = 0, tre = 0, loud = 0;
+
+  fillSineHz(in, audio::Fft::N, 100.0f, 0.6f);
+  for (int i = 0; i < 200; ++i) {
+    fft.magnitudes(in, mag);
+    be.process(mag, audio::Fft::BINS, 1.0f / 60.0f, &bass, &mid, &tre, &loud);
+  }
+  TEST_ASSERT_TRUE(bass > 0.5f);
+  TEST_ASSERT_TRUE(tre < 0.15f);
+
+  be.reset();
+  fillSineHz(in, audio::Fft::N, 5000.0f, 0.6f);
+  for (int i = 0; i < 200; ++i) {
+    fft.magnitudes(in, mag);
+    be.process(mag, audio::Fft::BINS, 1.0f / 60.0f, &bass, &mid, &tre, &loud);
+  }
+  TEST_ASSERT_TRUE(tre > 0.5f);
+  TEST_ASSERT_TRUE(bass < 0.15f);
+}
+
+void test_bands_decay_to_quiet_on_silence(void) {
+  static audio::Fft fft;
+  static float in[audio::Fft::N];
+  static float mag[audio::Fft::BINS];
+  audio::BandEnergy be;
+  float bass = 0, mid = 0, tre = 0, loud = 0;
+
+  fillSineHz(in, audio::Fft::N, 300.0f, 0.8f);
+  for (int i = 0; i < 120; ++i) {
+    fft.magnitudes(in, mag);
+    be.process(mag, audio::Fft::BINS, 1.0f / 60.0f, &bass, &mid, &tre, &loud);
+  }
+  TEST_ASSERT_TRUE(loud > 0.3f);
+
+  for (int i = 0; i < audio::Fft::N; ++i) in[i] = 0.0f;
+  for (int i = 0; i < 300; ++i) {
+    fft.magnitudes(in, mag);
+    be.process(mag, audio::Fft::BINS, 1.0f / 60.0f, &bass, &mid, &tre, &loud);
+  }
+  TEST_ASSERT_TRUE(loud < 0.05f);
+  TEST_ASSERT_TRUE(bass < 0.05f);
+}
+
+void test_bands_attack_faster_than_they_release(void) {
+  static audio::Fft fft;
+  static float in[audio::Fft::N];
+  static float mag[audio::Fft::BINS];
+  audio::BandEnergy be;
+  float mid = 0;
+  const float dt = 1.0f / 60.0f;
+
+  // Measured on `mid` rather than `loudness`: a single 400 Hz tone puts all its
+  // energy in one band, so the band reaches full scale where a cross-band mean
+  // cannot, and the test is about the smoothing rather than about the mixing.
+  fillSineHz(in, audio::Fft::N, 400.0f, 0.8f);
+  int rise = 0;
+  while (mid < 0.5f && rise < 2000) {
+    fft.magnitudes(in, mag);
+    be.process(mag, audio::Fft::BINS, dt, nullptr, &mid, nullptr, nullptr);
+    ++rise;
+  }
+  TEST_ASSERT_TRUE(rise < 2000);
+
+  for (int i = 0; i < audio::Fft::N; ++i) in[i] = 0.0f;
+  int fall = 0;
+  while (mid > 0.25f && fall < 4000) {
+    fft.magnitudes(in, mag);
+    be.process(mag, audio::Fft::BINS, dt, nullptr, &mid, nullptr, nullptr);
+    ++fall;
+  }
+  // Punchy means rising quickly and falling slowly. Symmetric smoothing reads
+  // as mush and the reverse reads as broken.
+  TEST_ASSERT_TRUE(fall > rise);
+}
+
+// ---------------------------------------------------------------------------
+// Onset detection
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Feeds `hops` analysis hops of a click train and counts detected onsets.
+// period_hops is how many hops apart the clicks are.
+int countOnsets(int hops, int period_hops, bool steady_tone) {
+  static audio::Fft fft;
+  static float in[audio::Fft::N];
+  static float mag[audio::Fft::BINS];
+  audio::OnsetDetector od;
+  core::Rng rng(12345);
+  int onsets = 0;
+
+  for (int h = 0; h < hops; ++h) {
+    if (steady_tone) {
+      fillSineHz(in, audio::Fft::N, 440.0f, 0.5f);
+    } else {
+      const bool click = period_hops > 0 && (h % period_hops) == 0;
+      for (int i = 0; i < audio::Fft::N; ++i)
+        in[i] = click ? (rng.unit() * 2.0f - 1.0f) * 0.9f : 0.0f;
+    }
+    fft.magnitudes(in, mag);
+    if (od.process(mag, audio::Fft::BINS)) ++onsets;
+  }
+  return onsets;
+}
+
+}  // namespace
+
+void test_onsets_fire_on_a_click_train(void) {
+  // 16 kHz with a 256-sample hop is 62.5 hops/s. 120 bpm is 2 beats/s, so a
+  // beat every 31 hops. Over 500 hops that is 16 beats.
+  const int onsets = countOnsets(500, 31, false);
+  TEST_ASSERT_TRUE(onsets >= 13);
+  TEST_ASSERT_TRUE(onsets <= 19);
+}
+
+void test_onsets_do_not_fire_on_a_steady_tone(void) {
+  // A detector that fires on sustained sound is useless: it would report a beat
+  // through every held note.
+  const int onsets = countOnsets(400, 0, true);
+  TEST_ASSERT_TRUE(onsets < 4);
+}
+
+void test_onsets_do_not_fire_on_silence(void) {
+  static audio::Fft fft;
+  static float in[audio::Fft::N] = {};
+  static float mag[audio::Fft::BINS];
+  audio::OnsetDetector od;
+  int onsets = 0;
+  for (int h = 0; h < 400; ++h) {
+    fft.magnitudes(in, mag);
+    if (od.process(mag, audio::Fft::BINS)) ++onsets;
+  }
+  TEST_ASSERT_EQUAL_INT(0, onsets);
+}
+
+// ---------------------------------------------------------------------------
+// Tempo tracking
+// ---------------------------------------------------------------------------
+
+void test_tempo_converges_on_120_bpm(void) {
+  audio::TempoTracker tt;
+  const float dt = 1.0f / 60.0f;
+  const int period = 30;  // frames between beats at 120 bpm and 60 fps
+  for (int f = 0; f < 60 * 12; ++f) tt.process((f % period) == 0, dt);
+  TEST_ASSERT_TRUE(tt.bpm() > 114.0f);
+  TEST_ASSERT_TRUE(tt.bpm() < 126.0f);
+}
+
+void test_tempo_phase_stays_in_range_and_wraps(void) {
+  audio::TempoTracker tt;
+  const float dt = 1.0f / 60.0f;
+  int wraps = 0;
+  float last = 0.0f;
+  for (int f = 0; f < 60 * 10; ++f) {
+    tt.process((f % 30) == 0, dt);
+    const float p = tt.beatPhase();
+    TEST_ASSERT_TRUE(p >= 0.0f && p < 1.0f);
+    if (p < last) ++wraps;
+    last = p;
+  }
+  TEST_ASSERT_TRUE(wraps > 15);
+}
+
+void test_tempo_ignores_implausible_intervals(void) {
+  audio::TempoTracker tt;
+  const float dt = 1.0f / 60.0f;
+  // Establish 120 bpm.
+  for (int f = 0; f < 60 * 8; ++f) tt.process((f % 30) == 0, dt);
+  const float before = tt.bpm();
+  // Then a burst of spurious onsets four frames apart - 900 bpm - which must not
+  // drag the estimate, or one noisy moment would ruin the tracking.
+  for (int f = 0; f < 60; ++f) tt.process((f % 4) == 0, dt);
+  TEST_ASSERT_FLOAT_WITHIN(8.0f, before, tt.bpm());
+}
+
+
+// ---------------------------------------------------------------------------
+// WavMic and AudioAnalyzer
+//
+// Fixtures come from tools/make_test_wav.py. Paths are relative to the repo
+// root, which is where pio test runs from.
+// ---------------------------------------------------------------------------
+
+namespace {
+const char *kSilence = "assets/audio/silence.wav";
+const char *kSine = "assets/audio/sine440.wav";
+const char *kClicks = "assets/audio/clicks120.wav";
+
+// Runs the analyzer for `secs` of simulated time and reports the final state.
+struct AnalyzerRun {
+  bool live;
+  float mean_bass;
+  float band_variation;  // max minus min of bass, so a frozen output is visible
+  int onsets;
+};
+
+AnalyzerRun runAnalyzer(const char *wav, float secs) {
+  desktop::WavMic mic;
+  const bool ok = wav ? mic.open(wav) : false;
+  audio::AudioAnalyzer an;
+  an.begin(ok ? &mic : nullptr);
+  an.setTrack(4242);
+
+  audio::Modulation m;
+  const float dt = 1.0f / 60.0f;
+  float sum = 0.0f, lo = 2.0f, hi = -1.0f;
+  int n = 0, onsets = 0;
+  const int frames = static_cast<int>(secs * 60.0f);
+  for (int i = 0; i < frames; ++i) {
+    if (ok) mic.advance(dt);
+    an.update(&m, dt);
+    if (m.onset) ++onsets;
+    // Skip the first second so the crossfade and the peak tracker have settled.
+    if (i > 60) {
+      sum += m.bass;
+      if (m.bass < lo) lo = m.bass;
+      if (m.bass > hi) hi = m.bass;
+      ++n;
+    }
+  }
+  AnalyzerRun r;
+  r.live = m.live;
+  r.mean_bass = n ? sum / n : 0.0f;
+  r.band_variation = n ? hi - lo : 0.0f;
+  r.onsets = onsets;
+  return r;
+}
+
+}  // namespace
+
+void test_wavmic_loads_a_fixture(void) {
+  desktop::WavMic mic;
+  TEST_ASSERT_TRUE(mic.open(kSine));
+  TEST_ASSERT_TRUE(mic.loaded());
+  TEST_ASSERT_EQUAL_INT(audio::SAMPLE_RATE, mic.sampleRate());
+}
+
+void test_wavmic_paces_output_and_stays_in_range(void) {
+  desktop::WavMic mic;
+  TEST_ASSERT_TRUE(mic.open(kSine));
+  float buf[256];
+  // Nothing until enough simulated time has passed: the pacing is what keeps a
+  // headless run deterministic rather than dependent on frame rate.
+  TEST_ASSERT_EQUAL_INT(0, mic.read(buf, 256));
+  mic.advance(0.05f);
+  TEST_ASSERT_EQUAL_INT(256, mic.read(buf, 256));
+  bool nonzero = false;
+  for (int i = 0; i < 256; ++i) {
+    TEST_ASSERT_TRUE(buf[i] >= -1.01f && buf[i] <= 1.01f);
+    if (buf[i] != 0.0f) nonzero = true;
+  }
+  TEST_ASSERT_TRUE(nonzero);
+}
+
+void test_wavmic_loops_at_the_end(void) {
+  desktop::WavMic mic;
+  TEST_ASSERT_TRUE(mic.open(kSilence));  // 3s, so it will wrap
+  float buf[256];
+  int total = 0;
+  for (int i = 0; i < 400; ++i) {
+    mic.advance(0.05f);
+    total += mic.read(buf, 256);
+  }
+  // Far more samples than the file holds, with no failure: it wrapped.
+  TEST_ASSERT_TRUE(total > audio::SAMPLE_RATE * 3);
+}
+
+void test_wavmic_missing_file_fails_cleanly(void) {
+  desktop::WavMic mic;
+  TEST_ASSERT_FALSE(mic.open("assets/audio/does-not-exist.wav"));
+  float buf[64];
+  mic.advance(1.0f);
+  TEST_ASSERT_EQUAL_INT(0, mic.read(buf, 64));
+}
+
+void test_analyzer_goes_live_on_music(void) {
+  const AnalyzerRun r = runAnalyzer(kClicks, 4.0f);
+  TEST_ASSERT_TRUE(r.live);
+  TEST_ASSERT_TRUE(r.onsets > 4);
+}
+
+void test_analyzer_falls_back_on_silence_and_keeps_moving(void) {
+  const AnalyzerRun r = runAnalyzer(kSilence, 4.0f);
+  TEST_ASSERT_FALSE(r.live);
+  // The important half: the fallback must still be ANIMATING. Reporting
+  // not-live while emitting a frozen zero would look exactly like a hang.
+  TEST_ASSERT_TRUE(r.band_variation > 0.05f);
+  TEST_ASSERT_TRUE(r.onsets > 4);
+}
+
+void test_analyzer_with_no_mic_at_all_still_animates(void) {
+  const AnalyzerRun r = runAnalyzer(nullptr, 4.0f);
+  TEST_ASSERT_FALSE(r.live);
+  TEST_ASSERT_TRUE(r.band_variation > 0.05f);
+}
+
+void test_analyzer_handover_is_not_instant(void) {
+  // A snap between live and procedural would be visible as a jolt, so the
+  // crossfade has to take real time.
+  desktop::WavMic mic;
+  TEST_ASSERT_TRUE(mic.open(kClicks));
+  audio::AudioAnalyzer an;
+  an.begin(&mic);
+  an.setTrack(7);
+  audio::Modulation m;
+  const float dt = 1.0f / 60.0f;
+  for (int i = 0; i < 240; ++i) {
+    mic.advance(dt);
+    an.update(&m, dt);
+  }
+  TEST_ASSERT_TRUE(m.live);
+
+  // Stop feeding audio. It must hold, then fade - not drop out immediately.
+  int frames_to_handover = 0;
+  for (int i = 0; i < 600 && m.live; ++i) {
+    an.update(&m, dt);  // no mic.advance, so read() returns nothing
+    ++frames_to_handover;
+  }
+  TEST_ASSERT_FALSE(m.live);
+  const float secs = frames_to_handover * dt;
+  // Long enough to be a fade rather than a jolt, and bounded so walking away
+  // from the desk is noticed within a few seconds rather than never.
+  TEST_ASSERT_TRUE(secs >= audio::AudioAnalyzer::QUIET_HOLD_S);
+  TEST_ASSERT_TRUE(secs < 12.0f);
+}
+
+void test_analyzer_rides_through_gaps_in_percussive_music(void) {
+  // A 120 bpm click track is five milliseconds of sound every five hundred, so
+  // an instantaneous level test reads it as silence almost all of the time. This
+  // is the case that broke the first version.
+  desktop::WavMic mic;
+  TEST_ASSERT_TRUE(mic.open(kClicks));
+  audio::AudioAnalyzer an;
+  an.begin(&mic);
+  an.setTrack(11);
+  audio::Modulation m;
+  const float dt = 1.0f / 60.0f;
+  for (int i = 0; i < 180; ++i) {
+    mic.advance(dt);
+    an.update(&m, dt);
+  }
+  // Now hold live through six seconds of the same material without a single
+  // frame of dropout.
+  int dropouts = 0;
+  for (int i = 0; i < 360; ++i) {
+    mic.advance(dt);
+    an.update(&m, dt);
+    if (!m.live) ++dropouts;
+  }
+  TEST_ASSERT_EQUAL_INT(0, dropouts);
+}
+
 int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_framebuffer_is_360_square);
@@ -795,5 +1262,28 @@ int main(int, char **) {
   RUN_TEST(test_procedural_tempo_is_plausible_and_seed_stable);
   RUN_TEST(test_procedural_onset_rate_matches_its_tempo);
   RUN_TEST(test_procedural_is_marked_not_live);
+  RUN_TEST(test_fft_finds_a_tone_at_bin_32);
+  RUN_TEST(test_fft_finds_a_tone_at_bin_100);
+  RUN_TEST(test_fft_of_silence_is_silent);
+  RUN_TEST(test_fft_puts_dc_in_bin_zero);
+  RUN_TEST(test_fft_has_no_state_between_calls);
+  RUN_TEST(test_bands_separate_low_from_high);
+  RUN_TEST(test_bands_decay_to_quiet_on_silence);
+  RUN_TEST(test_bands_attack_faster_than_they_release);
+  RUN_TEST(test_onsets_fire_on_a_click_train);
+  RUN_TEST(test_onsets_do_not_fire_on_a_steady_tone);
+  RUN_TEST(test_onsets_do_not_fire_on_silence);
+  RUN_TEST(test_tempo_converges_on_120_bpm);
+  RUN_TEST(test_tempo_phase_stays_in_range_and_wraps);
+  RUN_TEST(test_tempo_ignores_implausible_intervals);
+  RUN_TEST(test_wavmic_loads_a_fixture);
+  RUN_TEST(test_wavmic_paces_output_and_stays_in_range);
+  RUN_TEST(test_wavmic_loops_at_the_end);
+  RUN_TEST(test_wavmic_missing_file_fails_cleanly);
+  RUN_TEST(test_analyzer_goes_live_on_music);
+  RUN_TEST(test_analyzer_falls_back_on_silence_and_keeps_moving);
+  RUN_TEST(test_analyzer_with_no_mic_at_all_still_animates);
+  RUN_TEST(test_analyzer_handover_is_not_instant);
+  RUN_TEST(test_analyzer_rides_through_gaps_in_percussive_music);
   return UNITY_END();
 }

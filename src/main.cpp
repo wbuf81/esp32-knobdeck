@@ -16,6 +16,8 @@
 //   KNOB_PARTICLES=0    disable the particle layer
 //   KNOB_BANDS=1        composite in 40-row bands, as the device does, so the
 //                       band path itself can be regression-tested on the host
+//   KNOB_WAV=<path>     drive the analyser from a WAV instead of the procedural
+//                       fallback, standing in for the device's microphone
 //   KNOB_SCALE=<n>      window magnification (default 2)
 
 #include <SDL.h>
@@ -25,6 +27,7 @@
 #include <cstring>
 
 #include "audio/Modulation.h"
+#include "audio/AudioAnalyzer.h"
 #include "audio/Procedural.h"
 #include "core/FrameClock.h"
 #include "core/Hash.h"
@@ -33,6 +36,7 @@
 #include "gfx/Surface.h"
 #include "platform/desktop/FrameDump.h"
 #include "platform/desktop/SdlPresent.h"
+#include "platform/desktop/WavMic.h"
 #include "art/Image.h"
 #include "views/CoverLight.h"
 
@@ -62,11 +66,18 @@ int main(int, char **) {
 
   gfx::Framebuffer fb;
   views::CoverLight view;
-  audio::Procedural proc;
   audio::Modulation mod;
   core::Rng rng(0xC0FFEE);
 
-  proc.reseed(seed);
+  // The analyser owns the procedural fallback, so the desktop path is the same
+  // one the device runs: mic if there is something to hear, procedural if not.
+  desktop::WavMic mic;
+  const char *wav = std::getenv("KNOB_WAV");
+  const bool have_wav = wav && mic.open(wav);
+  if (wav && !have_wav) std::fprintf(stderr, "could not open %s\n", wav);
+  audio::AudioAnalyzer analyzer;
+  analyzer.begin(have_wav ? &mic : nullptr);
+  analyzer.setTrack(seed);
   view.begin(seed);
 
   // A synthetic cover until real artwork arrives, unless asked for the
@@ -94,7 +105,8 @@ int main(int, char **) {
   const float dt = step_ms * 0.001f;
 
   for (;;) {
-    proc.fill(&mod, dt);
+    if (have_wav) mic.advance(dt);
+    analyzer.update(&mod, dt);
     view.update(mod, dt, rng);
 
     if (use_bands) {
