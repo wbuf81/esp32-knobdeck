@@ -20,6 +20,11 @@
 #include "gfx/Color.h"
 #include "gfx/Dither.h"
 #include "gfx/Framebuffer.h"
+#include "art/Image.h"
+#include "audio/Procedural.h"
+#include "fx/Particles.h"
+#include "gfx/Quad3D.h"
+#include "gfx/Surface.h"
 #include "platform/desktop/FrameDump.h"
 
 // ---------------------------------------------------------------------------
@@ -325,6 +330,422 @@ void test_frame_dump_writes_a_readable_bmp(void) {
   TEST_ASSERT_EQUAL_UINT32(360u, h);
 }
 
+
+// ---------------------------------------------------------------------------
+// Quad3D
+//
+// The perspective divide and the UV orientation are the two things here that
+// look plausible when wrong, so both are asserted against analytically known
+// answers rather than against a screenshot.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+gfx::Surface fullSurface(gfx::Framebuffer &fb) {
+  gfx::Surface s;
+  s.px = fb.pixels();
+  s.w = gfx::W;
+  s.h = gfx::H;
+  s.y0 = 0;
+  return s;
+}
+
+// A 2x2 texture with four distinguishable corners. A symmetric test image
+// cannot catch a flipped or transposed mapping, which is the whole point.
+void fillCornerTexture(art::Image &t) {
+  t.allocate(2, 2);
+  t.set(0, 0, gfx::rgb565(255, 0, 0));      // top-left     red
+  t.set(1, 0, gfx::rgb565(0, 255, 0));      // top-right    green
+  t.set(0, 1, gfx::rgb565(0, 0, 255));      // bottom-left  blue
+  t.set(1, 1, gfx::rgb565(255, 255, 255));  // bottom-right white
+}
+
+// A frontal quad at constant z, spanning +-half in view space.
+void frontalQuad(gfx::Vec3 c[4], float half, float z) {
+  c[0] = {-half, -half, z};
+  c[1] = {half, -half, z};
+  c[2] = {half, half, z};
+  c[3] = {-half, half, z};
+}
+
+int litPixelsInColumn(const gfx::Framebuffer &fb, int x) {
+  int n = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    if (fb.at(x, y) != 0) ++n;
+  return n;
+}
+
+}  // namespace
+
+void test_quad_frontal_fills_the_projected_rectangle(void) {
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  art::Image tex;
+  fillCornerTexture(tex);
+  gfx::Quad3D q;
+  gfx::Vec3 c[4];
+  // z = 1 and half = 0.25 projects to +-0.25*340 = +-85 pixels about the centre.
+  frontalQuad(c, 0.25f, 1.0f);
+  gfx::Surface s = fullSurface(fb);
+  TEST_ASSERT_TRUE(q.draw(s, tex, c, 256, 255));
+
+  // Well inside the rectangle is covered; well outside is not.
+  TEST_ASSERT_TRUE(fb.at(180, 180) != 0);
+  TEST_ASSERT_TRUE(fb.at(100, 180) != 0);
+  TEST_ASSERT_TRUE(fb.at(260, 180) != 0);
+  TEST_ASSERT_EQUAL_HEX16(0x0000, fb.at(90, 180));
+  TEST_ASSERT_EQUAL_HEX16(0x0000, fb.at(270, 180));
+  TEST_ASSERT_EQUAL_HEX16(0x0000, fb.at(180, 90));
+  TEST_ASSERT_EQUAL_HEX16(0x0000, fb.at(180, 270));
+}
+
+void test_quad_uv_orientation_is_not_flipped_or_transposed(void) {
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  art::Image tex;
+  fillCornerTexture(tex);
+  gfx::Quad3D q;
+  gfx::Vec3 c[4];
+  frontalQuad(c, 0.25f, 1.0f);
+  gfx::Surface s = fullSurface(fb);
+  q.draw(s, tex, c, 256, 255);
+
+  // The rectangle runs x,y in [95, 265]. A quarter and three quarters across it
+  // land exactly on texel centres under bilinear sampling, so these are exact
+  // colours rather than blends.
+  const int lo = 95 + 42;
+  const int hi = 95 + 127;
+  uint8_t r, g, b;
+
+  gfx::unpack565(fb.at(lo, lo), r, g, b);  // top-left must be RED
+  TEST_ASSERT_TRUE(r > 200 && g < 60 && b < 60);
+
+  gfx::unpack565(fb.at(hi, lo), r, g, b);  // top-right must be GREEN
+  TEST_ASSERT_TRUE(g > 200 && r < 60 && b < 60);
+
+  gfx::unpack565(fb.at(lo, hi), r, g, b);  // bottom-left must be BLUE
+  TEST_ASSERT_TRUE(b > 200 && r < 60 && g < 60);
+
+  gfx::unpack565(fb.at(hi, hi), r, g, b);  // bottom-right must be WHITE
+  TEST_ASSERT_TRUE(r > 200 && g > 200 && b > 200);
+}
+
+void test_quad_rotation_produces_a_trapezoid_not_a_parallelogram(void) {
+  // This is the test that proves the perspective divide happens at all. An
+  // affine warp would draw a parallelogram: both vertical edges the same
+  // height. With a real divide the near edge must be measurably taller.
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  art::Image tex;
+  fillCornerTexture(tex);
+  gfx::Quad3D q;
+
+  const float h = 0.35f, z0 = 1.5f;
+  const float ct = 0.7071f, st = 0.7071f;  // 45 degrees about the y axis
+  gfx::Vec3 c[4];
+  c[0] = {-h * ct, -h, z0 - h * st};  // left edge is NEARER
+  c[1] = {h * ct, -h, z0 + h * st};   // right edge is FARTHER
+  c[2] = {h * ct, h, z0 + h * st};
+  c[3] = {-h * ct, h, z0 - h * st};
+
+  gfx::Surface s = fullSurface(fb);
+  TEST_ASSERT_TRUE(q.draw(s, tex, c, 256, 255));
+
+  // Find the drawn horizontal extent, then compare edge heights.
+  int first = -1, last = -1;
+  for (int x = 0; x < gfx::W; ++x) {
+    if (litPixelsInColumn(fb, x) > 0) {
+      if (first < 0) first = x;
+      last = x;
+    }
+  }
+  TEST_ASSERT_TRUE(first >= 0 && last > first);
+  const int near_h = litPixelsInColumn(fb, first + 2);
+  const int far_h = litPixelsInColumn(fb, last - 2);
+  TEST_ASSERT_TRUE(near_h > 0 && far_h > 0);
+  // Analytically 190 against 136 pixels, so demand a clear margin rather than
+  // just "different".
+  TEST_ASSERT_TRUE(near_h > far_h + 25);
+}
+
+void test_quad_behind_or_through_the_camera_draws_nothing(void) {
+  gfx::Framebuffer fb;
+  art::Image tex;
+  fillCornerTexture(tex);
+  gfx::Quad3D q;
+  gfx::Surface s = fullSurface(fb);
+  gfx::Vec3 c[4];
+
+  fb.fill(0x0000);
+  frontalQuad(c, 0.25f, -1.0f);  // entirely behind
+  TEST_ASSERT_FALSE(q.draw(s, tex, c, 256, 255));
+  TEST_ASSERT_EQUAL_HEX16(0x0000, fb.at(180, 180));
+
+  fb.fill(0x0000);
+  frontalQuad(c, 0.25f, 1.0f);
+  c[1].z = 0.01f;  // one corner inside the near plane
+  TEST_ASSERT_FALSE(q.draw(s, tex, c, 256, 255));
+  TEST_ASSERT_EQUAL_HEX16(0x0000, fb.at(180, 180));
+}
+
+void test_quad_larger_than_the_screen_is_clipped(void) {
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  art::Image tex;
+  fillCornerTexture(tex);
+  gfx::Quad3D q;
+  gfx::Vec3 c[4];
+  frontalQuad(c, 8.0f, 1.0f);  // projects far outside the panel
+  gfx::Surface s = fullSurface(fb);
+  q.draw(s, tex, c, 256, 255);
+  // Every corner covered, and crucially no crash or out-of-bounds write.
+  TEST_ASSERT_TRUE(fb.at(0, 0) != 0);
+  TEST_ASSERT_TRUE(fb.at(359, 359) != 0);
+  TEST_ASSERT_TRUE(fb.at(0, 359) != 0);
+  TEST_ASSERT_TRUE(fb.at(359, 0) != 0);
+}
+
+void test_quad_alpha_zero_is_a_no_op(void) {
+  gfx::Framebuffer fb;
+  fb.fill(0x1234);
+  art::Image tex;
+  fillCornerTexture(tex);
+  gfx::Quad3D q;
+  gfx::Vec3 c[4];
+  frontalQuad(c, 0.25f, 1.0f);
+  gfx::Surface s = fullSurface(fb);
+  TEST_ASSERT_FALSE(q.draw(s, tex, c, 0, 255));
+  TEST_ASSERT_EQUAL_HEX16(0x1234, fb.at(180, 180));
+}
+
+void test_quad_drawn_in_bands_matches_a_single_full_frame(void) {
+  // The device composites 40-row bands and the desktop composites whole frames.
+  // If those ever diverge, the desktop stops being a useful place to judge the
+  // device - so the equivalence is asserted, not assumed.
+  art::Image tex;
+  art::makePlaceholderCover(4242, 64, &tex);
+  gfx::Vec3 c[4];
+  const float h = 0.3f, z0 = 1.4f;
+  c[0] = {-h * 0.8f, -h, z0 - 0.2f};
+  c[1] = {h * 0.9f, -h * 0.9f, z0 + 0.25f};
+  c[2] = {h * 0.85f, h, z0 + 0.2f};
+  c[3] = {-h, h * 0.95f, z0 - 0.15f};
+
+  gfx::Framebuffer whole, banded;
+  whole.fill(0x0000);
+  banded.fill(0x0000);
+
+  gfx::Quad3D q1, q2;
+  gfx::Surface s = fullSurface(whole);
+  q1.draw(s, tex, c, 256, 255);
+
+  for (int y = 0; y < gfx::H; y += 40) {
+    gfx::Surface b;
+    b.px = banded.pixels() + static_cast<size_t>(y) * gfx::W;
+    b.w = gfx::W;
+    b.h = 40;
+    b.y0 = y;
+    q2.draw(b, tex, c, 256, 255);
+  }
+
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (whole.at(x, y) != banded.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+// ---------------------------------------------------------------------------
+// Placeholder cover
+// ---------------------------------------------------------------------------
+
+void test_placeholder_cover_is_asymmetric_and_deterministic(void) {
+  art::Image a, b;
+  art::makePlaceholderCover(99, 48, &a);
+  art::makePlaceholderCover(99, 48, &b);
+  TEST_ASSERT_TRUE(a.valid());
+  TEST_ASSERT_EQUAL_INT(48, a.width());
+  for (int i = 0; i < 48 * 48; i += 97)
+    TEST_ASSERT_EQUAL_HEX16(a.pixels()[i], b.pixels()[i]);
+
+  // The bright wedge must be in the top-left and nowhere else, or a flipped UV
+  // mapping would pass the orientation test above by symmetry.
+  uint8_t r, g, bl;
+  gfx::unpack565(a.at(2, 2), r, g, bl);
+  const int tl = r + g + bl;
+  gfx::unpack565(a.at(45, 45), r, g, bl);
+  const int br = r + g + bl;
+  TEST_ASSERT_TRUE(tl > br);
+}
+
+// ---------------------------------------------------------------------------
+// Particles
+// ---------------------------------------------------------------------------
+
+void test_particles_pool_is_capped_and_does_not_overflow(void) {
+  fx::Particles p;
+  fx::SpawnParams sp;
+  sp.colors[0] = 0xFFFF;
+  sp.color_count = 1;
+  p.configure(sp);
+  core::Rng rng(1);
+  p.emit(fx::Particles::MAX + 500, rng);
+  TEST_ASSERT_EQUAL_INT(fx::Particles::MAX, p.live());
+}
+
+void test_particles_expire(void) {
+  fx::Particles p;
+  fx::SpawnParams sp;
+  sp.life_min = 0.05f;
+  sp.life_max = 0.10f;
+  sp.colors[0] = 0xFFFF;
+  sp.color_count = 1;
+  p.configure(sp);
+  core::Rng rng(2);
+  p.emit(200, rng);
+  TEST_ASSERT_EQUAL_INT(200, p.live());
+  p.update(0.5f);
+  TEST_ASSERT_EQUAL_INT(0, p.live());
+}
+
+void test_particles_are_deterministic_for_a_seed(void) {
+  fx::SpawnParams sp;
+  sp.colors[0] = 0xF800;
+  sp.colors[1] = 0x07E0;
+  sp.color_count = 2;
+
+  gfx::Framebuffer a, b;
+  a.fill(0);
+  b.fill(0);
+  for (int pass = 0; pass < 2; ++pass) {
+    fx::Particles p;
+    p.configure(sp);
+    core::Rng rng(777);
+    gfx::Framebuffer &fb = pass == 0 ? a : b;
+    for (int f = 0; f < 30; ++f) {
+      p.emit(6, rng);
+      p.update(1.0f / 60.0f);
+    }
+    gfx::Surface s = fullSurface(fb);
+    p.render(s);
+  }
+  int diffs = 0;
+  for (size_t i = 0; i < gfx::Framebuffer::count(); ++i)
+    if (a.pixels()[i] != b.pixels()[i]) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+void test_particles_off_screen_write_nothing(void) {
+  fx::Particles p;
+  fx::SpawnParams sp;
+  sp.x = -400.0f;
+  sp.y = -400.0f;
+  sp.spread = 1.0f;
+  sp.speed_min = 0.0f;
+  sp.speed_max = 0.0f;
+  sp.colors[0] = 0xFFFF;
+  sp.color_count = 1;
+  p.configure(sp);
+  core::Rng rng(3);
+  p.emit(300, rng);
+  p.update(1.0f / 60.0f);
+
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  gfx::Surface s = fullSurface(fb);
+  p.render(s);
+  int lit = 0;
+  for (size_t i = 0; i < gfx::Framebuffer::count(); ++i)
+    if (fb.pixels()[i] != 0) ++lit;
+  TEST_ASSERT_EQUAL_INT(0, lit);
+}
+
+void test_particles_render_additively_over_a_background(void) {
+  fx::Particles p;
+  fx::SpawnParams sp;
+  sp.x = 180.0f;
+  sp.y = 180.0f;
+  sp.spread = 0.5f;
+  sp.speed_min = 0.0f;
+  sp.speed_max = 0.0f;
+  sp.size_min = 3.0f;
+  sp.size_max = 3.0f;
+  sp.colors[0] = gfx::rgb565(0, 0, 255);
+  sp.color_count = 1;
+  p.configure(sp);
+  core::Rng rng(4);
+  p.emit(40, rng);
+  p.update(1.0f / 60.0f);
+
+  gfx::Framebuffer fb;
+  const uint16_t bg = gfx::rgb565(120, 0, 0);
+  fb.fill(bg);
+  gfx::Surface s = fullSurface(fb);
+  p.render(s);
+
+  // Additive, so red must survive underneath and blue must have been added.
+  uint8_t r, g, b;
+  gfx::unpack565(fb.at(180, 180), r, g, b);
+  TEST_ASSERT_TRUE(r > 100);
+  TEST_ASSERT_TRUE(b > 40);
+}
+
+// ---------------------------------------------------------------------------
+// Procedural modulation
+// ---------------------------------------------------------------------------
+
+void test_procedural_stays_in_range(void) {
+  audio::Procedural pr;
+  audio::Modulation m;
+  pr.reseed(1234);
+  for (int i = 0; i < 8000; ++i) {
+    pr.fill(&m, 1.0f / 60.0f);
+    TEST_ASSERT_TRUE(m.bass >= 0.0f && m.bass <= 1.0f);
+    TEST_ASSERT_TRUE(m.mid >= 0.0f && m.mid <= 1.0f);
+    TEST_ASSERT_TRUE(m.treble >= 0.0f && m.treble <= 1.0f);
+    TEST_ASSERT_TRUE(m.loudness >= 0.0f && m.loudness <= 1.0f);
+    TEST_ASSERT_TRUE(m.beat_phase >= 0.0f && m.beat_phase < 1.0f);
+  }
+}
+
+void test_procedural_tempo_is_plausible_and_seed_stable(void) {
+  audio::Procedural a, b;
+  a.reseed(5150);
+  b.reseed(5150);
+  TEST_ASSERT_TRUE(a.bpm() >= 84.0f && a.bpm() <= 148.0f);
+  TEST_ASSERT_EQUAL_FLOAT(a.bpm(), b.bpm());
+
+  audio::Procedural c;
+  c.reseed(9999);
+  TEST_ASSERT_TRUE(c.bpm() != a.bpm());
+}
+
+void test_procedural_onset_rate_matches_its_tempo(void) {
+  audio::Procedural pr;
+  audio::Modulation m;
+  pr.reseed(31337);
+  const float dt = 1.0f / 60.0f;
+  int onsets = 0;
+  const int frames = 60 * 30;  // thirty seconds
+  for (int i = 0; i < frames; ++i) {
+    pr.fill(&m, dt);
+    if (m.onset) ++onsets;
+  }
+  const float expected = pr.bpm() * 0.5f;  // beats in thirty seconds
+  TEST_ASSERT_TRUE(onsets > expected * 0.85f);
+  TEST_ASSERT_TRUE(onsets < expected * 1.15f);
+}
+
+void test_procedural_is_marked_not_live(void) {
+  audio::Procedural pr;
+  audio::Modulation m;
+  m.live = true;
+  pr.reseed(7);
+  pr.fill(&m, 0.016f);
+  // Anything reading this must be able to tell it is not hearing a microphone.
+  TEST_ASSERT_FALSE(m.live);
+}
+
 int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_framebuffer_is_360_square);
@@ -357,5 +778,22 @@ int main(int, char **) {
   RUN_TEST(test_frame_clock_first_tick_is_zero);
   RUN_TEST(test_frame_clock_survives_the_millis_wrap);
   RUN_TEST(test_frame_dump_writes_a_readable_bmp);
+  RUN_TEST(test_quad_frontal_fills_the_projected_rectangle);
+  RUN_TEST(test_quad_uv_orientation_is_not_flipped_or_transposed);
+  RUN_TEST(test_quad_rotation_produces_a_trapezoid_not_a_parallelogram);
+  RUN_TEST(test_quad_behind_or_through_the_camera_draws_nothing);
+  RUN_TEST(test_quad_larger_than_the_screen_is_clipped);
+  RUN_TEST(test_quad_alpha_zero_is_a_no_op);
+  RUN_TEST(test_quad_drawn_in_bands_matches_a_single_full_frame);
+  RUN_TEST(test_placeholder_cover_is_asymmetric_and_deterministic);
+  RUN_TEST(test_particles_pool_is_capped_and_does_not_overflow);
+  RUN_TEST(test_particles_expire);
+  RUN_TEST(test_particles_are_deterministic_for_a_seed);
+  RUN_TEST(test_particles_off_screen_write_nothing);
+  RUN_TEST(test_particles_render_additively_over_a_background);
+  RUN_TEST(test_procedural_stays_in_range);
+  RUN_TEST(test_procedural_tempo_is_plausible_and_seed_stable);
+  RUN_TEST(test_procedural_onset_rate_matches_its_tempo);
+  RUN_TEST(test_procedural_is_marked_not_live);
   return UNITY_END();
 }

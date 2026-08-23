@@ -66,24 +66,33 @@ const uint16_t *BloomBand::glowRow(int screen_y) {
 void BloomBand::accumulateBand(const Surface &s) {
   for (int sy = s.y0 / SCALE; sy < s.yEnd() / SCALE; ++sy) {
     std::memset(acc_, 0, sizeof(acc_));
-    // Every other row and every other column: four samples per 4x4 cell.
-    for (int sub = 0; sub < SCALE; sub += 2) {
-      const int y = sy * SCALE + sub;
-      if (!s.containsRow(y)) continue;
+
+    // One row per cell, read contiguously across the whole width.
+    //
+    // Still four samples per 4x4 cell, the same as sampling two rows at stride
+    // two - but every read is sequential, which matters more than the sample
+    // count on a core that stalls on loads. Row 1 rather than 0 so the sample
+    // sits nearer the cell's centre.
+    const int y = sy * SCALE + 1;
+    if (s.containsRow(y)) {
       const uint16_t *row = s.row(y);
-      for (int x = 0; x < W; x += 2) {
-        uint8_t r, g, b;
-        unpack565(row[x], r, g, b);
-        if (luma(r, g, b) < threshold_) continue;
-        // Four samples per cell, each channel at most 255, so a 10-bit field
-        // per channel is plenty and the packed layout survives the accumulate.
-        acc_[x / SCALE] += pack888(r, g, b);
+      for (int sx = 0; sx < SW; ++sx) {
+        const uint16_t *cell = row + static_cast<size_t>(sx) * SCALE;
+        uint32_t sum = 0;
+        for (int k = 0; k < SCALE; ++k) {
+          uint8_t r, g, b;
+          unpack565(cell[k], r, g, b);
+          if (luma(r, g, b) < threshold_) continue;
+          sum += pack888(r, g, b);
+        }
+        acc_[sx] = sum;
       }
     }
+
     uint32_t *dst = &accum_[static_cast<size_t>(sy) * SW];
     for (int sx = 0; sx < SW; ++sx) {
-      // >>2 is the average of four samples. Masking after the shift is what
-      // keeps a channel that saturated from bleeding into its neighbour.
+      // >>2 is the average of four samples. Masking after the shift keeps a
+      // channel that saturated from bleeding into its neighbour.
       dst[sx] = (acc_[sx] >> 2) & 0x00FFFFFFu;
     }
   }

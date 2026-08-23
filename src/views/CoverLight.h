@@ -16,8 +16,10 @@
 
 #include "audio/Modulation.h"
 #include "core/Rng.h"
+#include "art/Image.h"
 #include "fx/Particles.h"
 #include "gfx/BloomBand.h"
+#include "gfx/Quad3D.h"
 #include "gfx/Surface.h"
 
 namespace views {
@@ -35,9 +37,15 @@ class CoverLight {
   // Leading guard entries, so the +-1 radial dither offset can never produce a
   // negative index and the inner loop needs no clamp branch.
   static constexpr int GRAD_PAD = 2;
-  static constexpr int MAX_RINGS = 6;
+  static constexpr int MAX_RINGS = 8;
 
   void begin(uint32_t track_seed);
+
+  // Borrowed, not owned: the cover lives in PSRAM and outlives any one view.
+  // Null renders the backdrop and particles alone, which must look deliberate
+  // rather than broken - a cover is missing for the first second or two of every
+  // uncached album.
+  void setCover(const art::Image *cover) { cover_ = cover; }
 
   // Once per frame, before any band.
   void update(const audio::Modulation &m, float dt, core::Rng &rng);
@@ -47,13 +55,19 @@ class CoverLight {
   void endFrame() { bloom_.endFrame(); }
 
   int particleCount() const { return parts_.live(); }
-  void setBloomStrength(uint8_t s) { bloom_.setStrength(s); }
+  void setBloomStrength(uint8_t s) {
+    bloom_.setStrength(s);
+    bloom_locked_ = true;  // stop update() from overriding a deliberate override
+  }
+  // The harness turns the particle layer off to prove it is really contributing
+  // rather than being drawn over by a later pass.
+  void setParticlesEnabled(bool on) { particles_on_ = on; }
 
   // Per-pass microsecond accumulators. Present because guessing which pass
   // costs what was wrong twice: the first optimisation pass targeted the
   // gradient, which turned out to be 1 ms of a 114 ms frame.
   struct Timing {
-    uint64_t backdrop = 0, particles = 0, bloom = 0;
+    uint64_t backdrop = 0, cover = 0, particles = 0, bloom = 0;
     uint32_t frames = 0;
   };
   Timing &timing() { return t_; }
@@ -63,11 +77,35 @@ class CoverLight {
   void buildGradient(const audio::Modulation &m);
 
   struct Ring {
-    float r = 0.0f;     // current radius, pixels
+    float r = 0.0f;      // current radius, pixels
     float speed = 0.0f;
-    float life = 0.0f;  // 1 at birth, 0 when gone
+    float width = 12.0f; // half-width of the crest, widens as it travels
+    float power = 1.0f;  // peak brightness contribution
+    float life = 0.0f;   // 1 at birth, 0 when gone
   };
 
+  void spawnRing(float strength, float bass);
+
+  // Local (lx, ly) on the cover plane to view space, through the current orbit
+  // and tilt.
+  gfx::Vec3 toView(float lx, float ly) const;
+  void drawCover(gfx::Surface &s);
+
+  const art::Image *cover_ = nullptr;
+  gfx::Quad3D quad_;
+  float orbit_ = 0.0f;
+  float tilt_ = 0.0f;
+  float cover_half_ = 0.21f;
+  // The cover sits above centre so its reflection has somewhere to go. On a
+  // round screen a centred subject with a reflection underneath runs the
+  // reflection straight off the bottom of the disc.
+  static constexpr float GROUP_Y = -0.075f;
+  // How far the reflection extends, as a fraction of the cover's height, and
+  // how many slices it fades over. Quad3D has no per-pixel gradient, so the
+  // fade is four quads with falling tint - which costs nothing extra per pixel
+  // and is indistinguishable from a smooth ramp at this size.
+  static constexpr float REFL_EXTENT = 0.85f;
+  static constexpr int REFL_SLICES = 4;
   fx::Particles parts_;
   gfx::BloomBand bloom_;
 
@@ -93,7 +131,10 @@ class CoverLight {
   float hue_ = 0.0f;
   float clock_ = 0.0f;
   float emit_acc_ = 0.0f;
+  bool half_beat_pending_ = false;
   Timing t_;
+  bool bloom_locked_ = false;
+  bool particles_on_ = true;
 };
 
 }  // namespace views

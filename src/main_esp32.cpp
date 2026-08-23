@@ -15,6 +15,7 @@
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 
+#include "art/Image.h"
 #include "audio/Modulation.h"
 #include "audio/Procedural.h"
 #include "core/FrameClock.h"
@@ -31,6 +32,7 @@
 namespace {
 
 views::CoverLight g_view;
+art::Image g_cover;
 audio::Procedural g_proc;
 audio::Modulation g_mod;
 core::FrameClock g_clock;
@@ -68,6 +70,17 @@ void setup() {
 
   g_proc.reseed(fnv1a("first-light"));
   g_view.begin(fnv1a("first-light"));
+
+  // A synthetic cover until Spotify artwork exists. 192x192 is 73 KB and lands
+  // in PSRAM; see art/ImageAlloc.cpp for why that is mandatory rather than
+  // preferred.
+  art::makePlaceholderCover(fnv1a("first-light"), 192, &g_cover);
+  if (g_cover.valid()) {
+    g_view.setCover(&g_cover);
+    Serial.printf("cover: %dx%d in PSRAM\n", g_cover.width(), g_cover.height());
+  } else {
+    Serial.println("cover: allocation failed; rendering the no-artwork path");
+  }
   esp32::panelBacklight(210);
   Serial.printf("procedural tempo: %.1f bpm\n", g_proc.bpm());
   Serial.printf("internal heap after setup: %lu, largest %lu\n",
@@ -127,11 +140,12 @@ void loop() {
     const float nb = t.frames ? static_cast<float>(t.frames) : 1.0f;
     const float f = 1000.0f / g_frames;
     Serial.printf(
-        "fps %5.1f frame %6.2f ms | upd %5.2f back %5.2f part %5.2f "
-        "accum %5.2f wait %5.2f swap %5.2f drain %5.2f blur %5.2f | "
+        "fps %5.1f frame %6.2f ms | upd %5.2f back %5.2f cover %5.2f "
+        "part %5.2f accum %5.2f wait %5.2f swap %5.2f drain %5.2f blur %5.2f | "
         "parts %4d heap %lu\n",
         fps, g_total_us * f / 1000000.0f, g_update_us * f / 1000000.0f,
-        t.backdrop / 1000.0f / nb * 9.0f, t.particles / 1000.0f / nb * 9.0f,
+        t.backdrop / 1000.0f / nb * 9.0f, t.cover / 1000.0f / nb * 9.0f,
+        t.particles / 1000.0f / nb * 9.0f,
         t.bloom / 1000.0f / nb * 9.0f, g_wait_us * f / 1000000.0f,
         g_commit_us * f / 1000000.0f, g_drain_us * f / 1000000.0f,
         g_blur_us * f / 1000000.0f,
