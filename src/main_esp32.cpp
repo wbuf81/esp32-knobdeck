@@ -289,6 +289,22 @@ void loop() {
       case Screen::Player:
         switch (g) {
           case input::Gesture::Tap:
+            // Flip is_playing LOCALLY first, then send.
+            //
+            // Not merely for a snappy UI: runCommand chooses between /play and
+            // /pause by reading this field, on the assumption the UI has already
+            // flipped it. Without the flip it sent /play while already playing,
+            // and Spotify answered 403 "restriction violated" - so tapping did
+            // nothing at all and the log said only 403.
+            //
+            // The settle window is what stops a poll already in flight from
+            // snapping the state back before Spotify has caught up.
+            if (g_net) {
+              g_net->mutate([](AppState &a) {
+                a.pb.is_playing = !a.pb.is_playing;
+                a.settle_playing.arm(millis(), 1500);
+              });
+            }
             c.type = CommandType::PlayPause;
             send = true;
             esp32::hapticsClick();
@@ -304,6 +320,15 @@ void loop() {
             esp32::hapticsBump();
             break;
           case input::Gesture::LongPress:
+            // Same reason: runCommand picks PUT or DELETE from `liked`, so the
+            // local flip has to happen before the command is queued.
+            if (g_net) {
+              g_net->mutate([](AppState &a) {
+                a.pb.liked = !a.pb.liked;
+                a.pb.liked_known = true;
+                a.settle_liked.arm(millis(), 2000);
+              });
+            }
             c.type = CommandType::ToggleLike;
             send = true;
             esp32::hapticsBump();
