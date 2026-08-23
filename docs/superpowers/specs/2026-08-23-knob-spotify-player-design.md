@@ -53,30 +53,98 @@ The M5's shared-SPI-bus deadlock and its IP5306 boost-latch bug are both
 board-specific and do not carry over. Those workarounds should be deleted, not
 ported.
 
-### Performance budget
+### Performance budget — MEASURED
 
-Measured references are from the M5 project's own board notes; the figures below
-for this board are **estimates to be validated in M4**.
+Measured on the physical unit on 2026-08-23 (`src/platform/esp32/Bench.cpp`),
+30 iterations per figure, one 360x360 RGB565 frame = 259,200 bytes. **These
+replace the estimates this section previously carried, which were optimistic by
+roughly 2x on PSRAM.**
 
-| Operation at 360x360 (129,600 px) | Estimated cost |
-|---|---|
-| Clear a full RGB565 frame in PSRAM | ~3 ms |
-| Full-frame read-modify-write pass | ~7 ms |
-| QSPI DMA push of one frame (259 KB, 4 lanes) | ~6.5 ms, **async, overlaps render** |
-| 3,000 additive particles, 4x4 px, from SRAM | ~3 ms |
-| Mode-7 style perspective floor, full screen | ~8-12 ms |
-| Bloom at 90x90 + bilinear upscale | ~3-4 ms |
-| 512-point real FFT (scalar FPU, plain C) | ~2 ms |
+| Operation | PSRAM | Internal SRAM |
+|---|---|---|
+| write u16 | 33.2 MB/s | 90.9 MB/s |
+| write u32 | 33.2 MB/s | **181.7 MB/s** |
+| memset | 33.2 MB/s | **725.3 MB/s** |
+| read u32 | 56.1 MB/s | 151.5 MB/s |
+| fade, arithmetic | 34.6 MB/s (14.3 ms/frame) | 43.3 MB/s (11.4 ms) |
+| fade, 2x256 LUT | 40.7 MB/s (12.1 ms) | 53.5 MB/s (9.3 ms) |
+| fade, skipping black | 61.3 MB/s (8.1 ms) | 94.3 MB/s (5.2 ms) |
+| addSat over full frame | 33.4 MB/s (14.8 ms) | 41.3 MB/s (12.0 ms) |
 
-Design point: **a 30 fps budget** — 33 ms per core per frame, two cores. That
-accommodates a 3D cover quad, ~2,000 additive particles, a persistence buffer, a
-bloom pass, and live mic-driven modulation simultaneously.
+Also measured at boot: PSRAM total 8,388,607 B, largest free block 8,257,524 B;
+internal heap free 370,508 B, largest free block 327,668 B.
 
-The loop is **variable-timestep, frame-rate-capped**: effects integrate against a
-real `dt` and are correct at any frame rate, while presentation is capped at
-60 fps so a cheap view does not burn power spinning. Heavy views land at 30-40 and
-degrade in smoothness rather than in behaviour. `dt` is clamped to a maximum so a
-stall cannot teleport a particle field.
+Three conclusions, each of which changes the design:
+
+1. **PSRAM writes are hard-capped at 33.2 MB/s.** u16, u32 and `memset` all
+   measure identically, so this is a bus ceiling rather than instruction count.
+   Any full-frame pass over a PSRAM framebuffer costs at least 7.45 ms, which
+   allows about two such passes per frame and no more.
+2. **Internal SRAM scales with access width; PSRAM does not.** 32-bit stores are
+   exactly twice 16-bit stores internally, and `memset` reaches 725 MB/s. Every
+   fill loop must therefore write pixel pairs, and clearing an internal buffer
+   is effectively free.
+3. **The per-pixel operations are CPU-bound, not memory-bound.** `fade` costs
+   11.4 ms in internal SRAM against 1.36 ms for a raw write of the same bytes.
+   This invalidates the contingency this spec previously carried - moving hot
+   passes into internal-SRAM bands "if PSRAM disappoints" would buy only ~25% on
+   `fade`, not the order of magnitude implied. The win is in reducing per-pixel
+   instruction count and in the *number* of passes, not in where the pixels
+   live. A LUT saves 19%; skipping already-black pixels saves 54%.
+
+## 2a. Render architecture (revised after measurement)
+
+The original design - two 360x360 framebuffers in PSRAM, double-buffered, with
+a seven-step pipeline over each - does not fit the measured budget. Six
+full-frame passes over PSRAM would cost over 45 ms before any drawing happened.
+
+**There is no full framebuffer.** Bands are composited in internal SRAM and DMA'd
+straight to the panel, so the 33 MB/s PSRAM write cost is never paid at all.
+
+```
+internal SRAM, resident (~107 KB; leaves ~220 KB for WiFi and mbedTLS)
+  band A / band B      360x40 RGB565 x2     57.6 KB   ping-pong, DMA out
+  bloom small          90x90 RGB888         24.3 KB   persists across frames
+  bloom blur scratch   90x90 RGB888         24.3 KB
+  fade LUT             2 x 256 x uint16      1.0 KB
+PSRAM
+  decoded album art, particle arrays, fixtures
+```
+
+Per frame: nine bands of 40 rows. Per band, **one fused sweep** - bloom-add,
+dither and mask all touch every pixel, so running them as separate passes would
+triple the dominant cost:
+
+```
+1. fill band with the backdrop gradient        u32 pair writes
+2. rasterise the cover quad rows in this band  bilinear from PSRAM art
+3. additive particle streaks clipped to band
+4. add bloom, bilinear from the resident 90x90 built LAST frame
+5. accumulate this band's bright-pass into next frame's 90x90
+6. dither + circular mask                      fused into step 4's sweep
+7. kick DMA for this band; render the next into the other buffer
+```
+
+Two consequences of the measurements, both of which are also aesthetic
+improvements rather than compromises:
+
+- **Bloom runs one frame late.** The 90x90 bright-pass is accumulated as bands
+  render and applied on the following frame. One frame of bloom latency at 30 fps
+  is imperceptible, and it removes the need to hold a whole frame anywhere.
+- **Particles are motion streaks, not a persistence buffer.** Each particle is
+  drawn as an additive streak from its previous position to its current one.
+  A persistence buffer would have needed a full frame in PSRAM at roughly 12 ms
+  per frame for the read-fade-write; streaks cost nothing beyond the pixels they
+  cover, and crisp motion streaks read better than a uniform frame fade.
+
+Estimated total: 20-25 ms per frame for a perspective-textured cover, ~2,000
+streak particles, bloom and dithering - i.e. 30-40 fps, with headroom.
+
+**Implications for the desktop build.** The desktop target keeps a single full
+360x360 buffer, since a host has no reason to band. The band abstraction is
+therefore a `Surface` (pointer, width, height, y-offset) that effects draw into;
+on the device it is a 40-row band, on the desktop the whole frame. Effects are
+written against `Surface` and are identical on both.
 
 ## 3. Decisions taken
 
