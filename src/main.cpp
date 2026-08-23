@@ -16,6 +16,8 @@
 //   KNOB_PARTICLES=0    disable the particle layer
 //   KNOB_BANDS=1        composite in 40-row bands, as the device does, so the
 //                       band path itself can be regression-tested on the host
+//   KNOB_SCREEN=list    preview the playlist browser instead of now-playing
+//   KNOB_POS=<f>        scroll position within that list, fractional
 //   KNOB_WAV=<path>     drive the analyser from a WAV instead of the procedural
 //                       fallback, standing in for the device's microphone
 //   KNOB_SCALE=<n>      window magnification (default 2)
@@ -39,6 +41,7 @@
 #include "platform/desktop/WavMic.h"
 #include "art/Image.h"
 #include "core/PlaybackState.h"
+#include "shell/ListView.h"
 #include "shell/NowPlaying.h"
 #include "shell/RadialShell.h"
 #include "views/CoverLight.h"
@@ -71,6 +74,25 @@ int main(int, char **) {
   views::CoverLight view;
   shell::RadialShell shell;
   shell::NowPlaying nowplaying;
+  shell::ListView listview;
+
+  // Stand-in library, so the browser layout can be judged without a network.
+  // Deliberately includes a name far too long for the disc and one with accents:
+  // those are the two cases the fitting and the font range exist for.
+  static const char *const kFakeItems[] = {
+      "Discover Weekly",
+      "Road Trip",
+      "Bj\xc3\xb6rk & Sigur R\xc3\xb3s Mix",
+      "Liked Songs",
+      "Deep Focus For Very Long Working Afternoons",
+      "Workout",
+      "Late Night Jazz",
+      "90s Rock Anthems",
+  };
+  const int kFakeCount = 8;
+  const char *screen_env = std::getenv("KNOB_SCREEN");
+  const bool list_mode = screen_env && std::strcmp(screen_env, "list") == 0;
+  view.setAmbient(list_mode);
 
   // A stand-in track so the text layout can be judged without a network. The
   // accented name is deliberate: it is the case the Latin-1 font range exists
@@ -131,6 +153,14 @@ int main(int, char **) {
         static_cast<uint32_t>(mod.progress01 * fake.duration_ms);
     nowplaying.prepare(fake, shown);
 
+    // A slow drift through the list, so a still frame shows it mid-glide - which
+    // is the state the fractional scroll exists to make look right.
+    float list_pos = static_cast<float>(sim_ms) / 1400.0f;
+    if (const char *p = std::getenv("KNOB_POS")) list_pos = std::atof(p);
+    while (list_pos > kFakeCount - 1) list_pos -= kFakeCount - 1;
+    if (list_mode)
+      listview.prepare(kFakeItems, kFakeCount, list_pos, "PLAYLISTS", false);
+
     if (use_bands) {
       for (int y = 0; y < gfx::H; y += band_h) {
         gfx::Surface s;
@@ -140,7 +170,8 @@ int main(int, char **) {
         s.y0 = y;
         view.renderBand(s);
         shell.render(s, mod.progress01, view.tint(), 62, sim_ms, mod.bass);
-        nowplaying.render(s, view.tint());
+        if (list_mode) listview.render(s, view.tint());
+        else nowplaying.render(s, view.tint());
       }
     } else {
       gfx::Surface s;
@@ -150,7 +181,8 @@ int main(int, char **) {
       s.y0 = 0;
       view.renderBand(s);
       shell.render(s, mod.progress01, view.tint(), 62, sim_ms, mod.bass);
-      nowplaying.render(s, view.tint());
+      if (list_mode) listview.render(s, view.tint());
+      else nowplaying.render(s, view.tint());
     }
     view.endFrame();
 

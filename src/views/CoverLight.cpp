@@ -121,7 +121,8 @@ void CoverLight::buildGradient(const audio::Modulation &m) {
   // particle in the field. The backdrop's job is to give the particles and the
   // album art something to be bright against; anything brighter than about a
   // quarter scale and it becomes the subject instead of the ground.
-  const float centre_v = 0.07f + 0.22f * m.loudness;
+  const float amb = ambient_ ? 0.35f : 1.0f;
+  const float centre_v = (0.07f + 0.22f * m.loudness) * amb;
   const float falloff = 2.2f + 2.6f * m.mid;
   const float core = 0.06f + 0.10f * m.bass;  // fraction of radius held flat
   const float inv_core = 1.0f / (1.0f - core);
@@ -171,7 +172,7 @@ void CoverLight::buildGradient(const audio::Modulation &m) {
       const float w = rings_[k].width;
       if (d > -w && d < w) {
         const float a = (d < 0 ? -d : d) / w;
-        const float f = 1.0f - a;
+        const float f = (1.0f - a) * (ambient_ ? 0.45f : 1.0f);
         // Cubic: a bright crest with a long trailing skirt, rather than the
         // symmetric bump a squared falloff gives.
         ring_add += f * f * f * rings_[k].life * rings_[k].power;
@@ -218,6 +219,10 @@ gfx::Vec3 CoverLight::toView(float lx, float ly) const {
 }
 
 void CoverLight::drawCover(gfx::Surface &s) {
+  // Skipped entirely while browsing. It is also the most expensive pass, so the
+  // browser runs faster than the player rather than slower - which is the right
+  // way round for a screen you are scrolling.
+  if (ambient_) return;
   if (!cover_ || !cover_->valid()) return;
   const float h = cover_half_;
 
@@ -282,7 +287,9 @@ void CoverLight::update(const audio::Modulation &m, float dt, core::Rng &rng) {
   if (m.onset) {
     spawnRing(1.0f, m.bass);
     // Comet-fast, so the streaks actually streak. See SpawnParams below.
-    parts_.burst(90 + static_cast<int>(110.0f * m.bass), 0.85f + m.bass, rng);
+    parts_.burst(
+        static_cast<int>((90 + 110.0f * m.bass) * (ambient_ ? 0.25f : 1.0f)),
+        0.85f + m.bass, rng);
     half_beat_pending_ = true;
   }
 
@@ -296,7 +303,7 @@ void CoverLight::update(const audio::Modulation &m, float dt, core::Rng &rng) {
 
   // A steady drizzle so the field never empties between beats. Accumulated as a
   // float so the rate is frame-rate independent rather than per-frame.
-  emit_acc_ += (44.0f + 76.0f * m.loudness) * dt;
+  emit_acc_ += (44.0f + 76.0f * m.loudness) * (ambient_ ? 0.30f : 1.0f) * dt;
   const int n = static_cast<int>(emit_acc_);
   if (n > 0) {
     emit_acc_ -= static_cast<float>(n);
@@ -307,7 +314,8 @@ void CoverLight::update(const audio::Modulation &m, float dt, core::Rng &rng) {
   buildGradient(m);
 
   if (!bloom_locked_)
-    bloom_.setStrength(static_cast<uint8_t>(105 + 110.0f * m.loudness));
+    bloom_.setStrength(static_cast<uint8_t>(
+        (105 + 110.0f * m.loudness) * (ambient_ ? 0.45f : 1.0f)));
 }
 
 void CoverLight::renderBand(gfx::Surface &s) {

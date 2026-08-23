@@ -18,6 +18,7 @@
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 
+#include <cmath>
 #include <cstring>
 
 #include "art/Image.h"
@@ -34,11 +35,13 @@
 #include "gfx/Surface.h"
 #include "input/Gesture.h"
 #include "net/NetWorker.h"
+#include "spotify/Library.h"
 #include "platform/esp32/Bench.h"
 #include "platform/esp32/Boot.h"
 #include "platform/esp32/InputHw.h"
 #include "platform/esp32/Panel.h"
 #include "platform/esp32/Pins.h"
+#include "shell/ListView.h"
 #include "shell/NowPlaying.h"
 #include "shell/RadialShell.h"
 #include "views/CoverLight.h"
@@ -55,6 +58,32 @@ core::Rng g_rng(0xC0FFEE);
 ProgressClock g_progress;
 shell::RadialShell g_shell;
 shell::NowPlaying g_nowplaying;
+shell::ListView g_list;
+spotify::Library g_library;
+
+// Which screen is up.
+//
+// Deliberately a plain enum and a couple of ints rather than a screen stack:
+// there are three states and one way between each pair, and a stack would be
+// machinery for navigation this device does not have.
+enum class Screen : uint8_t { Player, Playlists, Tracks };
+Screen g_screen = Screen::Player;
+
+int g_sel = 0;            // the selected row
+float g_sel_pos = 0.0f;   // eased position, so the wheel glides to it
+uint32_t g_lib_gen = 0;   // last library generation the UI laid out
+char g_open_uri[52] = {};
+char g_open_name[52] = {};
+
+// Item pointers handed to the list. Rebuilt each frame, which is 32 pointer
+// stores - far cheaper than any way of keeping it in sync.
+const char *g_items[spotify::Library::MAX_TRACKS];
+
+int listCount() {
+  if (g_screen == Screen::Playlists) return g_library.playlistCount();
+  if (g_screen == Screen::Tracks) return g_library.trackCount();
+  return 0;
+}
 input::GestureRecognizer g_gesture;
 
 // Volume is tracked locally so a knob turn responds on the frame it happens,
@@ -125,10 +154,11 @@ void setup() {
   // NOT calling encoderPlainInputMode() here. It pauses the counter and takes
   // the pins back with pinMode, so leaving it in place meant PCNT was never
   // actually under test - the diagnostic was the reason the counter read zero.
-  // GPIO0 carries a 10K pull-up beside the encoder's on the schematic and this
-  // knob presses in, so it is the likely push switch. Read only: it is also the
-  // boot strapping pin.
-  pinMode(0, INPUT_PULLUP);
+  //
+  // The knob's press is NOT readable from this MCU. GPIO0 was the only
+  // candidate - the schematic puts a 10K pull-up on it beside the encoder's -
+  // and it never moves when the knob is pressed. So selection is a centre tap,
+  // which the touch panel already gives us.
   LOGF("haptics: %s", esp32::hapticsBegin() ? "ok" : "NOT RESPONDING");
 
   const uint32_t seed = fnv1a("first-light");
@@ -153,6 +183,8 @@ void setup() {
     g_net = &net;
     // No SD card wired up yet, so artwork will report unavailable rather than
     // silently failing - which is the distinction the ancestor's notes insist on.
+    LOGF("library: %s", g_library.begin() ? "lists in PSRAM" : "ALLOC FAILED");
+    net.setLibrary(&g_library);
     g_net->start("/sd/art", g_cfg.wifi_ssid.c_str(), g_cfg.wifi_password.c_str());
     LOGF("net: worker started on core 0");
   } else {
@@ -210,30 +242,38 @@ void loop() {
 
   // --- input ---
   //
-  // No pin-level polling here any more. The burst that proved the encoder pins
-  // move - 600 samples at 40us - cost 24 ms of every frame, which was most of a
-  // 12 fps frame time and by far the largest single cost in the renderer. PCNT
-  // counts in hardware; nothing needs to watch the pins.
+  // No pin-level polling here. The burst that proved the encoder pins move -
+  // 600 samples at 40us - cost 24 ms of every frame, and PCNT counts in
+  // hardware.
   const int detents = esp32::encoderDelta();
   if (detents != 0) {
-    if (g_volume < 0) g_volume = st.pb.volume_pct >= 0 ? st.pb.volume_pct : 50;
-    g_volume += detents * 2;
-    if (g_volume < 0) g_volume = 0;
-    if (g_volume > 100) g_volume = 100;
-    g_shell.showVolume(g_volume, now);
     esp32::hapticsClick();
-    if (g_net) {
-      // Coalesced: a fast spin sends the final value once rather than forty
-      // times, which is what keeps the rate limit and the knob both happy.
-      Command c;
-      c.type = CommandType::SetVolume;
-      c.arg = g_volume;
-      g_net->submit(c);
-      g_net->mutate([](AppState &a) { a.settle_volume.arm(millis(), 1200); });
+    if (g_screen == Screen::Player) {
+      if (g_volume < 0) g_volume = st.pb.volume_pct >= 0 ? st.pb.volume_pct : 50;
+      g_volume += detents * 2;
+      if (g_volume < 0) g_volume = 0;
+      if (g_volume > 100) g_volume = 100;
+      g_shell.showVolume(g_volume, now);
+      if (g_net) {
+        // Coalesced: a fast spin sends the final value once rather than forty
+        // times, which keeps both the rate limit and the knob happy.
+        Command c;
+        c.type = CommandType::SetVolume;
+        c.arg = g_volume;
+        g_net->submit(c);
+        g_net->mutate([](AppState &a) { a.settle_volume.arm(millis(), 1200); });
+      }
+      LOGF("knob: %+d -> volume %d%%", detents, g_volume);
+    } else {
+      // Clamped rather than wrapped. On a list you cannot see the ends of,
+      // wrapping from the last item to the first feels like a glitch.
+      const int n = listCount();
+      g_sel += detents;
+      if (g_sel < 0) g_sel = 0;
+      if (g_sel > n - 1) g_sel = n > 0 ? n - 1 : 0;
     }
-    g_knob_detents += detents;
-    LOGF("knob: %+d -> volume %d%%", detents, g_volume);
-  } else if (st.pb.volume_pct >= 0 && !g_shell.volumeVisible(now)) {
+  } else if (g_screen == Screen::Player && st.pb.volume_pct >= 0 &&
+             !g_shell.volumeVisible(now)) {
     g_volume = st.pb.volume_pct;  // resync once the local edit has settled
   }
 
@@ -244,32 +284,106 @@ void loop() {
     LOGF("touch: %s at (%d,%d)", input::gestureName(g), tx, ty);
     Command c;
     bool send = false;
-    switch (g) {
-      case input::Gesture::Tap:
-        c.type = CommandType::PlayPause;
-        send = true;
-        esp32::hapticsClick();
+
+    switch (g_screen) {
+      case Screen::Player:
+        switch (g) {
+          case input::Gesture::Tap:
+            c.type = CommandType::PlayPause;
+            send = true;
+            esp32::hapticsClick();
+            break;
+          case input::Gesture::SwipeLeft:
+            c.type = CommandType::Previous;
+            send = true;
+            esp32::hapticsBump();
+            break;
+          case input::Gesture::SwipeRight:
+            c.type = CommandType::Next;
+            send = true;
+            esp32::hapticsBump();
+            break;
+          case input::Gesture::LongPress:
+            c.type = CommandType::ToggleLike;
+            send = true;
+            esp32::hapticsBump();
+            break;
+          case input::Gesture::SwipeUp:
+            // Open the browser and ask for the listing. The list appears
+            // immediately and empty rather than after the round trip, so the
+            // gesture feels answered.
+            g_screen = Screen::Playlists;
+            g_sel = 0;
+            g_sel_pos = 0.0f;
+            c.type = CommandType::FetchPlaylists;
+            send = true;
+            esp32::hapticsBump();
+            break;
+          default:
+            break;
+        }
         break;
-      case input::Gesture::SwipeLeft:
-        c.type = CommandType::Previous;
-        send = true;
-        esp32::hapticsBump();
+
+      case Screen::Playlists:
+        if (g == input::Gesture::Tap) {
+          const spotify::Entry *e = g_library.playlist(g_sel);
+          if (e) {
+            std::strncpy(g_open_uri, e->uri, sizeof(g_open_uri) - 1);
+            std::strncpy(g_open_name, e->name, sizeof(g_open_name) - 1);
+            g_screen = Screen::Tracks;
+            g_sel = 0;
+            g_sel_pos = 0.0f;
+            c.type = CommandType::FetchTracks;
+            std::strncpy(c.uri, e->uri, sizeof(c.uri) - 1);
+            std::strncpy(c.text, e->name, sizeof(c.text) - 1);
+            send = true;
+            esp32::hapticsBump();
+          }
+        } else if (g == input::Gesture::SwipeDown) {
+          g_screen = Screen::Player;
+          esp32::hapticsBump();
+        }
         break;
-      case input::Gesture::SwipeRight:
-        c.type = CommandType::Next;
-        send = true;
-        esp32::hapticsBump();
-        break;
-      case input::Gesture::LongPress:
-        c.type = CommandType::ToggleLike;
-        send = true;
-        esp32::hapticsBump();
-        break;
-      default:
+
+      case Screen::Tracks:
+        if (g == input::Gesture::Tap) {
+          if (g_library.trackCount() > 0 && g_open_uri[0]) {
+            // Played WITHIN the playlist, by offset, so the rest of it follows.
+            c.type = CommandType::PlayFromContext;
+            std::strncpy(c.uri, g_open_uri, sizeof(c.uri) - 1);
+            c.arg = g_sel;
+            send = true;
+            esp32::hapticsBump();
+            g_screen = Screen::Player;
+          }
+        } else if (g == input::Gesture::SwipeDown) {
+          g_screen = Screen::Playlists;
+          g_sel = 0;
+          g_sel_pos = 0.0f;
+          esp32::hapticsBump();
+        }
         break;
     }
     if (send && g_net) g_net->submit(c);
   }
+
+  // A fresh listing resets the selection: keeping row 7 selected while the list
+  // underneath it changed would point at something the user never chose.
+  if (g_screen != Screen::Player) {
+    const uint32_t gen = g_library.generation();
+    if (gen != g_lib_gen) {
+      g_lib_gen = gen;
+      g_sel = 0;
+      g_sel_pos = 0.0f;
+    }
+    // Ease toward the selection. Frame-rate independent, and clamped so a big
+    // jump still arrives rather than crawling.
+    const float target = static_cast<float>(g_sel);
+    const float k = 1.0f - std::exp(-dt * 14.0f);
+    g_sel_pos += (target - g_sel_pos) * k;
+    if (std::fabs(target - g_sel_pos) < 0.002f) g_sel_pos = target;
+  }
+  g_view.setAmbient(g_screen != Screen::Player);
 
   g_analyzer.update(&g_mod, dt);
   g_mod.progress01 = st.pb.duration_ms
@@ -281,7 +395,21 @@ void loop() {
   g_view.update(g_mod, dt, g_rng);
 
   // Measured, truncated and formatted once per frame, not once per band.
-  g_nowplaying.prepare(st.pb, shown_progress);
+  if (g_screen == Screen::Player) {
+    g_nowplaying.prepare(st.pb, shown_progress);
+  } else {
+    const bool playlists = g_screen == Screen::Playlists;
+    const int n = listCount();
+    for (int i = 0; i < n; ++i) {
+      const spotify::Entry *e =
+          playlists ? g_library.playlist(i) : g_library.track(i);
+      g_items[i] = e ? e->name : nullptr;
+    }
+    g_list.prepare(g_items, n, g_sel_pos,
+                   playlists ? "PLAYLISTS" : g_open_name,
+                   playlists ? g_library.playlistsTruncated()
+                             : g_library.tracksTruncated());
+  }
 
   if (g_panel_ok) {
     esp32::panelBeginFrame();
@@ -298,7 +426,8 @@ void loop() {
                      g_volume >= 0 ? g_volume : st.pb.volume_pct, now,
                      g_mod.bass);
       const uint64_t sh1 = esp_timer_get_time();
-      g_nowplaying.render(s, g_view.tint());
+      if (g_screen == Screen::Player) g_nowplaying.render(s, g_view.tint());
+      else g_list.render(s, g_view.tint());
       const uint64_t sh2 = esp_timer_get_time();
       g_shell_us += sh1 - sh0;
       g_text_us += sh2 - sh1;

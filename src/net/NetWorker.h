@@ -47,6 +47,10 @@ class NetWorker {
   // UI side: copy the shared state out for rendering.
   AppState snapshot();
 
+  // Borrowed. The browser's listings live here; the net task fills them, the
+  // render task reads them through the library's generation counter.
+  void setLibrary(spotify::Library *lib) { source_.setLibrary(lib); }
+
   // UI side: the decoded cover for an album, or null. Borrowed, not owned, and
   // valid until two further album changes - see art/CoverCache.h.
   const art::Image *cover(const char *album_id) const {

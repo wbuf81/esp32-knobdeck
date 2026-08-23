@@ -1,5 +1,7 @@
 #include "SpotifySource.h"
 
+#include <cstring>
+
 // How large a cover to ask Spotify for.
 //
 // The ancestor read this from its UI theme header, which coupled the Spotify
@@ -177,6 +179,28 @@ void SpotifySource::runCommand(const Command &c, AppState *out,
       method = out->pb.liked ? "PUT" : "DELETE";
       break;
     }
+    case CommandType::FetchPlaylists:
+      fetchPlaylists(out, now_ms);
+      return;
+    case CommandType::FetchTracks:
+      // c.uri is the playlist URI, c.text its name; the bare id is the tail of
+      // the URI.
+      fetchTracks(c.arg >= 0 ? nullptr : nullptr, c.uri, c.text, out, now_ms);
+      return;
+    case CommandType::PlayFromContext: {
+      url = std::string(API) + "/me/player/play";
+      method = "PUT";
+      // Playing WITHIN a context rather than as a bare track URI, so what
+      // follows is the rest of the playlist. A bare uris:[...] play would end
+      // the queue after this one song, which is not what picking a track from a
+      // playlist means.
+      char buf[192];
+      std::snprintf(buf, sizeof(buf),
+                    "{\"context_uri\":\"%s\",\"offset\":{\"position\":%d}}",
+                    c.uri, c.arg);
+      body = buf;
+      break;
+    }
     case CommandType::None:
       return;
   }
@@ -334,6 +358,107 @@ void SpotifySource::pollPlayer(AppState *out, uint32_t now_ms) {
   next_poll_.arm(now_ms, out->pb.is_playing
                              ? POLL_PLAYING_MS
                              : (idle_poll_ ? POLL_ASLEEP_MS : POLL_PAUSED_MS));
+}
+
+namespace {
+
+// The bare id is the last colon-separated field of a Spotify URI.
+const char *idFromUri(const char *uri) {
+  if (!uri) return "";
+  const char *last = std::strrchr(uri, ':');
+  return last ? last + 1 : uri;
+}
+
+}  // namespace
+
+void SpotifySource::fetchPlaylists(AppState *out, uint32_t now_ms) {
+  if (!library_) return;
+
+  // fields= trims the response server-side. Spotify's full playlist objects
+  // carry images, owners and follower counts; asking for three fields turns a
+  // response measured in tens of kilobytes into one measured in hundreds of
+  // bytes per item, which is the difference between parsing it on this board and
+  // not.
+  char url[160];
+  std::snprintf(url, sizeof(url),
+                "%s/me/playlists?limit=%d&fields=items(name,uri,id),total", API,
+                spotify::Library::MAX_PLAYLISTS);
+
+  HttpResponse resp;
+  if (!call("GET", url, "", &resp, out, now_ms)) return;
+  if (resp.status != 200) {
+    NETLOG("playlists -> %d", resp.status);
+    return;
+  }
+
+  JsonDocument doc;
+  if (deserializeJson(doc, resp.body) != DeserializationError::Ok) {
+    NETLOG("playlists: could not parse %u bytes", (unsigned)resp.body.size());
+    return;
+  }
+
+  library_->clearPlaylists();
+  JsonArrayConst items = doc["items"];
+  int n = 0;
+  for (JsonObjectConst it : items) {
+    const char *name = it["name"] | "";
+    const char *uri = it["uri"] | "";
+    if (!name[0] || !uri[0]) continue;  // a null entry is a deleted playlist
+    if (!library_->addPlaylist(name, uri, it["id"] | "")) break;
+    ++n;
+  }
+  const int total = doc["total"] | n;
+  library_->publishPlaylists(total > n);
+  NETLOG("playlists: %d of %d", n, total);
+}
+
+void SpotifySource::fetchTracks(const char *playlist_id,
+                                const char *playlist_uri,
+                                const char *playlist_name, AppState *out,
+                                uint32_t now_ms) {
+  if (!library_ || !playlist_uri || !playlist_uri[0]) return;
+  const char *id = playlist_id && playlist_id[0] ? playlist_id
+                                                 : idFromUri(playlist_uri);
+
+  // Cleared and published FIRST, so a frame drawn mid-fetch shows an empty list
+  // under the new heading rather than the previous playlist's tracks under it.
+  library_->clearTracks(playlist_uri, playlist_name);
+
+  char url[200];
+  std::snprintf(
+      url, sizeof(url),
+      "%s/playlists/%s/tracks?limit=%d&fields=items(track(name,uri,id)),total",
+      API, id, spotify::Library::MAX_TRACKS);
+
+  HttpResponse resp;
+  if (!call("GET", url, "", &resp, out, now_ms)) return;
+  if (resp.status != 200) {
+    NETLOG("tracks -> %d", resp.status);
+    library_->publishTracks(false);
+    return;
+  }
+
+  JsonDocument doc;
+  if (deserializeJson(doc, resp.body) != DeserializationError::Ok) {
+    NETLOG("tracks: could not parse %u bytes", (unsigned)resp.body.size());
+    library_->publishTracks(false);
+    return;
+  }
+
+  JsonArrayConst items = doc["items"];
+  int n = 0;
+  for (JsonObjectConst it : items) {
+    JsonObjectConst t = it["track"];
+    if (t.isNull()) continue;  // a local file or an unavailable track
+    const char *name = t["name"] | "";
+    const char *uri = t["uri"] | "";
+    if (!name[0] || !uri[0]) continue;
+    if (!library_->addTrack(name, uri, t["id"] | "")) break;
+    ++n;
+  }
+  const int total = doc["total"] | n;
+  library_->publishTracks(total > n);
+  NETLOG("tracks: %d of %d in %s", n, total, playlist_name ? playlist_name : "");
 }
 
 void SpotifySource::refreshLiked(AppState *out, uint32_t now_ms) {

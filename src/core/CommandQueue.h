@@ -15,11 +15,23 @@ enum class CommandType : uint8_t {
   Previous,
   SetVolume,   // arg = 0..100
   ToggleLike,
+  // Browser. These are requests from the UI to the net task; results land in
+  // spotify::Library and are picked up through its generation counter.
+  FetchPlaylists,
+  FetchTracks,      // uri = playlist uri, text = its name
+  PlayFromContext,  // uri = playlist uri, arg = track offset within it
 };
 
 struct Command {
   CommandType type = CommandType::None;
   int arg = 0;
+  // A URI and a display name, for the browser commands.
+  //
+  // Fixed buffers rather than std::string: this struct crosses a FreeRTOS queue
+  // between two tasks, and the ancestor's rule about avoiding per-command
+  // allocation on a fragmenting heap applies here more than anywhere.
+  char uri[52] = {};
+  char text[52] = {};
 };
 
 template <int CAPACITY = 8>

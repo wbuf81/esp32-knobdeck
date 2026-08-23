@@ -12,11 +12,9 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace art {
+#include "core/BigAlloc.h"
 
-// Platform-provided. Device returns PSRAM; desktop returns plain heap.
-void *imageAlloc(size_t bytes);
-void imageFree(void *p);
+namespace art {
 
 class Image {
  public:

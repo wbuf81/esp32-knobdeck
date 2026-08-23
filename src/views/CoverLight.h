@@ -66,6 +66,17 @@ class CoverLight {
   // rather than being drawn over by a later pass.
   void setParticlesEnabled(bool on) { particles_on_ = on; }
 
+  // Recede, so something can be read on top.
+  //
+  // A translucent scrim over the disc would be the obvious way to make the
+  // browser legible, and it would be a full-frame read-modify-write - the single
+  // most expensive thing this renderer can do. Turning the scene down instead
+  // costs nothing: the cover is skipped, the field thins out and the vignette
+  // drops. It also reads better, as the visuals stepping back rather than
+  // something being laid over them.
+  void setAmbient(bool on) { ambient_ = on; }
+  bool ambient() const { return ambient_; }
+
   // Per-pass microsecond accumulators. Present because guessing which pass
   // costs what was wrong twice: the first optimisation pass targeted the
   // gradient, which turned out to be 1 ms of a 114 ms frame.
@@ -139,6 +150,7 @@ class CoverLight {
   Timing t_;
   bool bloom_locked_ = false;
   bool particles_on_ = true;
+  bool ambient_ = false;
 };
 
 }  // namespace views

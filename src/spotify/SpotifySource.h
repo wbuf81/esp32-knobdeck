@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "../art/CoverCache.h"
+#include "Library.h"
 #include "../core/AppState.h"
 #include "../core/Deadline.h"
 #include "../core/CommandQueue.h"
@@ -25,6 +26,10 @@ class SpotifySource {
                 const char *refresh_token);
 
   void begin(const std::string &cache_dir);
+
+  // Borrowed. The browser's listings live here; the net task fills them and the
+  // render task reads them through the library's generation counter.
+  void setLibrary(spotify::Library *lib) { library_ = lib; }
 
   // Render task: the decoded cover for this album, or null. Published under an
   // atomic by the net task; see art/CoverCache.h for why that is enough.
@@ -58,6 +63,9 @@ class SpotifySource {
   void pollPlayer(AppState *out, uint32_t now_ms);
   void refreshLiked(AppState *out, uint32_t now_ms);
   void diagnose(AppState *out, uint32_t now_ms);
+  void fetchPlaylists(AppState *out, uint32_t now_ms);
+  void fetchTracks(const char *playlist_id, const char *playlist_uri,
+                   const char *playlist_name, AppState *out, uint32_t now_ms);
   void probeLibraryWrite(AppState *out, uint32_t now_ms);
 
   SpotifyAuth auth_;
@@ -89,4 +97,5 @@ class SpotifySource {
   bool liked_supported_ = true;
 
   bool idle_poll_ = false;
+  spotify::Library *library_ = nullptr;
 };
