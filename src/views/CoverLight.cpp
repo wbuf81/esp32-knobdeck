@@ -240,13 +240,17 @@ void CoverLight::renderBand(gfx::Surface &s) {
       row[x] = gfx::addSat(grad_[GRAD_PAD + idx], gl[x]);
       ++x;
     }
-    for (; x + 1 <= x1; x += 2) {
+    // One addSat per PAIR, not per pixel.
+    //
+    // buildGlowRow writes four identical values per small pixel, so for any even
+    // x, gl[x] and gl[x+1] are always the same entry - both halves of a pair
+    // always land inside one four-pixel glow block. That makes the second
+    // saturating add provably redundant rather than approximately redundant.
+    uint32_t *out = reinterpret_cast<uint32_t *>(&row[x]);
+    for (; x + 1 <= x1; x += 2, ++out) {
       const int idx = ((dx2_[x] + dy2) >> GRAD_SHIFT) + bay[x & 3];
-      const uint16_t base = grad_[GRAD_PAD + idx];
-      const uint16_t a = gfx::addSat(base, gl[x]);
-      const uint16_t b = gfx::addSat(base, gl[x + 1]);
-      *reinterpret_cast<uint32_t *>(&row[x]) =
-          (static_cast<uint32_t>(b) << 16) | a;
+      const uint16_t v = gfx::addSat(grad_[GRAD_PAD + idx], gl[x]);
+      *out = (static_cast<uint32_t>(v) << 16) | v;
     }
     for (; x <= x1; ++x) {  // odd tail
       const int idx = ((dx2_[x] + dy2) >> GRAD_SHIFT) + bay[x & 3];
