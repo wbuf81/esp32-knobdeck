@@ -20,6 +20,7 @@ Usage:
 
 import base64
 import getpass
+import re
 import http.server
 import json
 import os
@@ -162,6 +163,21 @@ def exchange(client_id: str, client_secret: str, code: str) -> dict:
         sys.exit(f"error: token exchange failed ({e.code}): {detail}")
 
 
+def read_existing(path: Path) -> dict:
+    """The #define values already in secrets.h, so a partial run can preserve
+    what it is not replacing. Values are only ever passed straight back into the
+    file, never printed."""
+    found = {}
+    try:
+        for line in path.read_text().splitlines():
+            m = re.match(r'\s*#define\s+(\w+)\s+"(.*)"\s*$', line)
+            if m:
+                found[m.group(1)] = m.group(2)
+    except OSError:
+        pass
+    return found
+
+
 def main() -> int:
     client_id = prompt_secret("SPOTIFY_CLIENT_ID", "Spotify Client ID")
     client_secret = prompt_secret("SPOTIFY_CLIENT_SECRET", "Spotify Client Secret")
@@ -219,6 +235,23 @@ def main() -> int:
 
     out = Path(__file__).resolve().parent.parent / "src" / "config" / "secrets.h"
     out.parent.mkdir(parents=True, exist_ok=True)
+
+    # Carry forward anything the user skipped.
+    #
+    # Skipping the WiFi prompts used to write empty strings straight over
+    # working credentials, so re-running this to add a Spotify scope silently
+    # took the device off the network - and the only symptom was a boot line
+    # saying wifi=MISSING. A tool for rotating one credential must not destroy
+    # the others.
+    if out.exists() and (not wifi_ssid or not wifi_password):
+        keep = read_existing(out)
+        if not wifi_ssid:
+            wifi_ssid = keep.get("WIFI_SSID", "")
+            if wifi_ssid:
+                print("Keeping the WiFi SSID already in secrets.h.")
+        if not wifi_password:
+            wifi_password = keep.get("WIFI_PASSWORD", "")
+
     out.write_text(
         HEADER_TEMPLATE.format(
             wifi_ssid=wifi_ssid,
