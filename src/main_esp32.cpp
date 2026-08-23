@@ -92,6 +92,11 @@ input::GestureRecognizer g_gesture;
 // from snapping the number back to what it was before the turn.
 int g_volume = -1;
 
+// Idle return from the browser. Long enough to read a list, short enough that
+// walking away leaves the device showing what is playing.
+constexpr uint32_t IDLE_RETURN_MS = 15000;
+uint32_t g_last_input_ms = 0;
+
 // Cumulative knob totals, reported in the periodic status line.
 //
 // Kept as running totals rather than logged per event so diagnosing the knob
@@ -280,6 +285,19 @@ void loop() {
   int tx = 0, ty = 0;
   const bool touching = esp32::touchRead(&tx, &ty);
   const input::Gesture g = g_gesture.update(touching, tx, ty, now);
+  if (g != input::Gesture::None || detents != 0) g_last_input_ms = now;
+
+  // Drift back to the player after a spell of nothing.
+  //
+  // Being stranded in a list is the one state this device cannot explain: there
+  // is no visible way back except a gesture you have to remember. It also means
+  // the visuals return on their own, which is what the thing is for.
+  if (g_screen != Screen::Player && now - g_last_input_ms > IDLE_RETURN_MS) {
+    g_screen = Screen::Player;
+    g_sel = 0;
+    g_sel_pos = 0.0f;
+  }
+
   if (g != input::Gesture::None) {
     LOGF("touch: %s at (%d,%d)", input::gestureName(g), tx, ty);
     Command c;
@@ -376,48 +394,31 @@ void loop() {
             c.arg = 0;
             send = true;
             esp32::hapticsBump();
-            // Queued behind the play, so the queue read reflects the new
-            // context rather than the old one.
-            if (g_net) {
-              Command q;
-              q.type = CommandType::FetchQueue;
-              g_net->submit(c);
-              g_net->submit(q);
-              send = false;  // already submitted, in order
-            }
-            g_screen = Screen::Tracks;
+            // Straight back to the player. You asked for music, so the answer is
+            // the music: a new cover, a new title and a reset ring. Landing in
+            // another list instead made a one-gesture request feel like a detour.
+            g_screen = Screen::Player;
             g_sel = 0;
             g_sel_pos = 0.0f;
           }
         } else if (g == input::Gesture::SwipeDown) {
           g_screen = Screen::Player;
           esp32::hapticsBump();
-        } else if (g == input::Gesture::SwipeUp) {
-          // Straight to the queue without choosing a playlist.
-          g_screen = Screen::Tracks;
-          g_sel = 0;
-          g_sel_pos = 0.0f;
-          c.type = CommandType::FetchQueue;
-          send = true;
-          esp32::hapticsBump();
         }
         break;
 
       case Screen::Tracks:
-        if (g == input::Gesture::Tap) {
-          // A status list, not a chooser: there is no way to jump into a queue
-          // by index, so tap keeps its usual meaning here.
-          if (g_net) {
-            g_net->mutate([](AppState &a) {
-              a.pb.is_playing = !a.pb.is_playing;
-              a.settle_playing.arm(millis(), 1500);
-            });
-          }
-          c.type = CommandType::PlayPause;
-          send = true;
-          esp32::hapticsClick();
-        } else if (g == input::Gesture::SwipeDown) {
-          g_screen = Screen::Playlists;
+        // Tap does NOTHING here, deliberately.
+        //
+        // This is a status list, not a chooser: Spotify offers no way to jump
+        // into a queue by index, so any tap action would be pretending. It used
+        // to toggle playback, which made one gesture mean "select" on one screen
+        // and "play/pause" on the next.
+        if (g == input::Gesture::SwipeDown) {
+          // Straight to the player, not back to the chooser. Both browser
+          // screens are siblings reached from the player - up for playlists,
+          // down for the queue - so one swipe always gets you home.
+          g_screen = Screen::Player;
           g_sel = 0;
           g_sel_pos = 0.0f;
           esp32::hapticsBump();
@@ -478,10 +479,12 @@ void loop() {
         playlists ? "PLAYLISTS"
                   : (g_library.tracksOf()[0] ? g_library.tracksOf()
                                              : g_open_name);
+    // In UP NEXT the queue's first entry is the track playing now.
+    const int current = playlists ? -1 : (n > 0 ? 0 : -1);
     g_list.prepare(g_items, n, g_sel_pos, heading,
                    playlists ? g_library.playlistsTruncated()
                              : g_library.tracksTruncated(),
-                   note);
+                   note, current);
   }
 
   if (g_panel_ok) {

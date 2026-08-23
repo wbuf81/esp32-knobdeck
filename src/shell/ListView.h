@@ -37,8 +37,11 @@ class ListView {
   // `note` replaces the list body when there is nothing to show - "empty" is
   // not the same message as "Spotify will not let an app read this one", and
   // showing the first for the second blames the wrong party.
+  // `current` marks the row that is playing now, drawn in the album tint so it
+  // reads as "you are here" rather than as just another entry. -1 for none.
   void prepare(const char *const *items, int count, float pos,
-               const char *heading, bool truncated, const char *note = nullptr);
+               const char *heading, bool truncated, const char *note = nullptr,
+               int current = -1);
   // Once per band.
   void render(gfx::Surface &s, uint16_t tint) const;
 
@@ -47,7 +50,8 @@ class ListView {
     char text[72] = {};
     int x = 0;
     int baseline = 0;
-    int level = 0;  // 0 = centre, 1 = neighbour, 2 = outer
+    int level = 0;      // 0 = centre, 1 = neighbour, 2 = outer
+    bool current = false;  // this is the track playing now
   };
 
   Row rows_[ROWS + 2];
@@ -57,6 +61,11 @@ class ListView {
   char note_[44] = {};
   int note_x_ = 0;
   bool empty_ = false;
+  // Where the selection ticks go. Computed in prepare() because it depends on
+  // the chord at the centre row, which is geometry, not drawing.
+  int tick_left_ = 0;
+  int tick_right_ = 0;
+  int tick_y_ = 0;
 };
 
 }  // namespace shell

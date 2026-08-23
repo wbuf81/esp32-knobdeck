@@ -64,7 +64,8 @@ void fitInto(char *dst, size_t cap, const gfx::GFXfont &f, const char *src,
 }  // namespace
 
 void ListView::prepare(const char *const *items, int count, float pos,
-                       const char *heading, bool truncated, const char *note) {
+                       const char *heading, bool truncated, const char *note,
+                       int current) {
   row_count_ = 0;
   note_[0] = '\0';
   empty_ = count <= 0;
@@ -86,6 +87,17 @@ void ListView::prepare(const char *const *items, int count, float pos,
   const int centre = static_cast<int>(std::lround(pos));
   const float frac = pos - static_cast<float>(centre);
 
+  // Selection markers flank the centre row's TEXT, not the disc's chord.
+  //
+  // The chord was tried first and is 160-odd pixels from the name at this row -
+  // far enough that the marks read as unrelated furniture, and sitting exactly
+  // where the progress ring and the particle field already are. Anchoring them
+  // to the text costs a measurement that prepare() is doing anyway and puts them
+  // where the eye already is.
+  tick_y_ = CENTRE_BASELINE - 6;
+  tick_left_ = 0;
+  tick_right_ = 0;
+
   for (int d = -WING - 1; d <= WING + 1; ++d) {
     const int idx = centre + d;
     if (idx < 0 || idx >= count) continue;
@@ -105,6 +117,14 @@ void ListView::prepare(const char *const *items, int count, float pos,
     r.x = gfx::CX - gfx::textWidth(f, r.text) / 2;
     r.baseline = baseline;
     r.level = level > 2 ? 2 : level;
+    r.current = idx == current;
+    if (level == 0) {
+      // Anchored to this row's measured extent, so they track a name of any
+      // length instead of drifting away from a short one.
+      const int w = gfx::textWidth(f, r.text);
+      tick_left_ = r.x - 13;
+      tick_right_ = r.x + w + 9;
+    }
     if (++row_count_ >= static_cast<int>(sizeof(rows_) / sizeof(rows_[0])))
       break;
   }
@@ -128,11 +148,31 @@ void ListView::render(gfx::Surface &s, uint16_t tint) const {
     return;
   }
 
+  // Selection markers: two solid wedges pointing at the selected name.
+  if (tick_left_ || tick_right_) {
+    for (int k = 0; k < 9; ++k) {
+      const int y = tick_y_ + k - 4;
+      if (!s.containsRow(y)) continue;
+      // Widest at the middle row, so each wedge is a triangle pointing inward.
+      const int len = 5 - (k > 4 ? k - 4 : 4 - k);
+      if (len <= 0) continue;
+      uint16_t *row = s.row(y);
+      for (int d = 0; d < len; ++d) {
+        const int xl = tick_left_ - d;
+        const int xr = tick_right_ + d;
+        if (xl >= 0 && xl < gfx::W) row[xl] = tint;
+        if (xr >= 0 && xr < gfx::W) row[xr] = tint;
+      }
+    }
+  }
+
   for (int i = 0; i < row_count_; ++i) {
     const Row &r = rows_[i];
     if (!r.text[0]) continue;
-    gfx::drawText(s, fontFor(r.level), r.x, r.baseline, r.text,
-                  colorFor(r.level, tint));
+    // The playing row takes the album tint, so "where am I in this" is answered
+    // by colour rather than by counting.
+    const uint16_t col = r.current ? tint : colorFor(r.level, tint);
+    gfx::drawText(s, fontFor(r.level), r.x, r.baseline, r.text, col);
   }
 
   if (note_[0])
