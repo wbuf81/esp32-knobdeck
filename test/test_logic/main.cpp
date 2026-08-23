@@ -30,7 +30,9 @@
 #include "gfx/Quad3D.h"
 #include "gfx/fonts/Fonts.h"
 #include "input/Gesture.h"
+#include "shell/ListView.h"
 #include "shell/RadialShell.h"
+#include "spotify/Library.h"
 #include "gfx/Surface.h"
 #include "platform/desktop/FrameDump.h"
 #include "platform/desktop/WavMic.h"
@@ -1613,6 +1615,223 @@ void test_half_chord_narrows_toward_the_poles(void) {
   TEST_ASSERT_EQUAL_INT(0, gfx::halfChordAt(gfx::CY + gfx::RADIUS + 5, 0));
 }
 
+
+// ---------------------------------------------------------------------------
+// Library
+// ---------------------------------------------------------------------------
+
+void test_library_publishes_only_complete_listings(void) {
+  spotify::Library lib;
+  TEST_ASSERT_TRUE(lib.begin());
+  TEST_ASSERT_EQUAL_INT(0, lib.playlistCount());
+
+  const uint32_t gen0 = lib.generation();
+  lib.clearPlaylists();
+  lib.addPlaylist("Road Trip", "spotify:playlist:abc", "abc");
+  lib.addPlaylist("Liked Songs", "spotify:playlist:def", "def");
+  // Not published yet: the count must still read zero, or the render task can
+  // walk into entries the net task is mid-way through writing.
+  TEST_ASSERT_EQUAL_INT(0, lib.playlistCount());
+  TEST_ASSERT_EQUAL_UINT32(gen0, lib.generation());
+
+  lib.publishPlaylists(false);
+  TEST_ASSERT_EQUAL_INT(2, lib.playlistCount());
+  TEST_ASSERT_TRUE(lib.generation() != gen0);
+  TEST_ASSERT_EQUAL_STRING("Road Trip", lib.playlist(0)->name);
+  TEST_ASSERT_EQUAL_STRING("spotify:playlist:def", lib.playlist(1)->uri);
+}
+
+void test_library_caps_and_reports_truncation(void) {
+  spotify::Library lib;
+  TEST_ASSERT_TRUE(lib.begin());
+  lib.clearPlaylists();
+  int added = 0;
+  for (int i = 0; i < spotify::Library::MAX_PLAYLISTS + 20; ++i)
+    if (lib.addPlaylist("x", "spotify:playlist:x", "x")) ++added;
+  lib.publishPlaylists(false);
+  TEST_ASSERT_EQUAL_INT(spotify::Library::MAX_PLAYLISTS, added);
+  TEST_ASSERT_EQUAL_INT(spotify::Library::MAX_PLAYLISTS, lib.playlistCount());
+  // A capped list must say so rather than reading as the whole library.
+  TEST_ASSERT_TRUE(lib.playlistsTruncated());
+}
+
+void test_library_clearing_tracks_publishes_empty_immediately(void) {
+  // The heading changes the moment a playlist is opened, so the list under it
+  // must go empty at the same moment - not keep showing the previous playlist's
+  // tracks until the fetch returns.
+  spotify::Library lib;
+  TEST_ASSERT_TRUE(lib.begin());
+  lib.clearTracks("spotify:playlist:one", "One");
+  lib.addTrack("A", "spotify:track:a", "a");
+  lib.addTrack("B", "spotify:track:b", "b");
+  lib.publishTracks(false);
+  TEST_ASSERT_EQUAL_INT(2, lib.trackCount());
+
+  const uint32_t gen = lib.generation();
+  lib.clearTracks("spotify:playlist:two", "Two");
+  TEST_ASSERT_EQUAL_INT(0, lib.trackCount());
+  TEST_ASSERT_TRUE(lib.generation() != gen);
+  TEST_ASSERT_EQUAL_STRING("Two", lib.tracksOf());
+}
+
+void test_library_out_of_range_reads_are_null(void) {
+  spotify::Library lib;
+  TEST_ASSERT_TRUE(lib.begin());
+  TEST_ASSERT_NULL(lib.playlist(0));
+  TEST_ASSERT_NULL(lib.playlist(-1));
+  TEST_ASSERT_NULL(lib.track(999));
+  lib.clearPlaylists();
+  lib.addPlaylist("only", "spotify:playlist:o", "o");
+  lib.publishPlaylists(false);
+  TEST_ASSERT_NOT_NULL(lib.playlist(0));
+  TEST_ASSERT_NULL(lib.playlist(1));
+}
+
+void test_library_truncates_overlong_names_safely(void) {
+  spotify::Library lib;
+  TEST_ASSERT_TRUE(lib.begin());
+  char longname[400];
+  for (int i = 0; i < 399; ++i) longname[i] = 'x';
+  longname[399] = '\0';
+  lib.clearPlaylists();
+  lib.addPlaylist(longname, longname, longname);
+  lib.publishPlaylists(false);
+  const spotify::Entry *e = lib.playlist(0);
+  TEST_ASSERT_NOT_NULL(e);
+  // Terminated inside the field, so nothing downstream reads past it.
+  TEST_ASSERT_TRUE(std::strlen(e->name) < sizeof(e->name));
+  TEST_ASSERT_TRUE(std::strlen(e->uri) < sizeof(e->uri));
+}
+
+// ---------------------------------------------------------------------------
+// ListView
+// ---------------------------------------------------------------------------
+
+namespace {
+
+int litIn(const gfx::Framebuffer &fb, int y0, int y1) {
+  int n = 0;
+  for (int y = y0; y < y1; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (fb.at(x, y) != 0) ++n;
+  return n;
+}
+
+const char *const kItems[] = {"One", "Two", "Three", "Four", "Five", "Six"};
+
+}  // namespace
+
+void test_listview_centre_row_is_the_brightest(void) {
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  shell::ListView lv;
+  lv.prepare(kItems, 6, 2.0f, "HEADING", false);
+  gfx::Surface s = fullSurface(fb);
+  lv.render(s, 0x07FF);
+
+  // The selected row sits at the centre baseline; its neighbours are dimmer, so
+  // the centre band must carry more lit pixels than the band above it.
+  const int c = shell::ListView::CENTRE_BASELINE;
+  const int centre = litIn(fb, c - 16, c + 4);
+  const int above = litIn(fb, c - shell::ListView::ROW_SPACING - 16,
+                          c - shell::ListView::ROW_SPACING + 4);
+  TEST_ASSERT_TRUE(centre > 0);
+  TEST_ASSERT_TRUE(above > 0);
+  TEST_ASSERT_TRUE(centre > above);
+}
+
+void test_listview_scrolling_moves_the_selection(void) {
+  // The same item drawn at two scroll positions must land on different rows.
+  gfx::Framebuffer a, b;
+  a.fill(0x0000);
+  b.fill(0x0000);
+  shell::ListView la, lb;
+  gfx::Surface sa = fullSurface(a);
+  gfx::Surface sb = fullSurface(b);
+  la.prepare(kItems, 6, 1.0f, "H", false);
+  la.render(sa, 0x07FF);
+  lb.prepare(kItems, 6, 3.0f, "H", false);
+  lb.render(sb, 0x07FF);
+
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (a.at(x, y) != b.at(x, y)) ++diffs;
+  TEST_ASSERT_TRUE(diffs > 200);
+}
+
+void test_listview_fractional_position_differs_from_whole(void) {
+  // The float scroll is the whole reason the wheel glides; a mid-glide frame
+  // must not render identically to the settled one.
+  gfx::Framebuffer a, b;
+  a.fill(0x0000);
+  b.fill(0x0000);
+  shell::ListView la, lb;
+  gfx::Surface sa = fullSurface(a);
+  gfx::Surface sb = fullSurface(b);
+  la.prepare(kItems, 6, 2.0f, "H", false);
+  la.render(sa, 0x07FF);
+  lb.prepare(kItems, 6, 2.45f, "H", false);
+  lb.render(sb, 0x07FF);
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (a.at(x, y) != b.at(x, y)) ++diffs;
+  TEST_ASSERT_TRUE(diffs > 50);
+}
+
+void test_listview_empty_says_so(void) {
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  shell::ListView lv;
+  lv.prepare(nullptr, 0, 0.0f, "PLAYLISTS", false);
+  gfx::Surface s = fullSurface(fb);
+  lv.render(s, 0x07FF);
+  // An empty list must draw something. A blank screen is indistinguishable from
+  // a rendering failure.
+  TEST_ASSERT_TRUE(litIn(fb, 0, gfx::H) > 20);
+}
+
+void test_listview_handles_null_items_and_short_lists(void) {
+  const char *const holey[] = {"One", nullptr, "Three"};
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  shell::ListView lv;
+  gfx::Surface s = fullSurface(fb);
+  // A deleted playlist comes back as a null entry; it must be skipped, not
+  // dereferenced.
+  lv.prepare(holey, 3, 1.0f, "H", false);
+  lv.render(s, 0x07FF);
+  lv.prepare(holey, 1, 0.0f, "H", false);
+  lv.render(s, 0x07FF);
+  TEST_ASSERT_TRUE(true);  // reaching here without a crash is the assertion
+}
+
+void test_listview_drawn_in_bands_matches_full_frame(void) {
+  gfx::Framebuffer whole, banded;
+  whole.fill(0x0000);
+  banded.fill(0x0000);
+  shell::ListView l1, l2;
+  l1.prepare(kItems, 6, 2.37f, "PLAYLISTS", true);
+  l2.prepare(kItems, 6, 2.37f, "PLAYLISTS", true);
+
+  gfx::Surface s = fullSurface(whole);
+  l1.render(s, 0x07FF);
+  for (int y = 0; y < gfx::H; y += 20) {
+    gfx::Surface b;
+    b.px = banded.pixels() + static_cast<size_t>(y) * gfx::W;
+    b.w = gfx::W;
+    b.h = 20;
+    b.y0 = y;
+    l2.render(b, 0x07FF);
+  }
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (whole.at(x, y) != banded.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
 int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_framebuffer_is_360_square);
@@ -1708,5 +1927,16 @@ int main(int, char **) {
   RUN_TEST(test_text_outside_the_surface_draws_nothing);
   RUN_TEST(test_text_drawn_in_bands_matches_full_frame);
   RUN_TEST(test_half_chord_narrows_toward_the_poles);
+  RUN_TEST(test_library_publishes_only_complete_listings);
+  RUN_TEST(test_library_caps_and_reports_truncation);
+  RUN_TEST(test_library_clearing_tracks_publishes_empty_immediately);
+  RUN_TEST(test_library_out_of_range_reads_are_null);
+  RUN_TEST(test_library_truncates_overlong_names_safely);
+  RUN_TEST(test_listview_centre_row_is_the_brightest);
+  RUN_TEST(test_listview_scrolling_moves_the_selection);
+  RUN_TEST(test_listview_fractional_position_differs_from_whole);
+  RUN_TEST(test_listview_empty_says_so);
+  RUN_TEST(test_listview_handles_null_items_and_short_lists);
+  RUN_TEST(test_listview_drawn_in_bands_matches_full_frame);
   return UNITY_END();
 }
