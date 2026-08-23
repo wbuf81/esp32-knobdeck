@@ -28,6 +28,8 @@
 #include "audio/Procedural.h"
 #include "fx/Particles.h"
 #include "gfx/Quad3D.h"
+#include "input/Gesture.h"
+#include "shell/RadialShell.h"
 #include "gfx/Surface.h"
 #include "platform/desktop/FrameDump.h"
 #include "platform/desktop/WavMic.h"
@@ -563,6 +565,43 @@ void test_quad_drawn_in_bands_matches_a_single_full_frame(void) {
 // ---------------------------------------------------------------------------
 // Placeholder cover
 // ---------------------------------------------------------------------------
+
+void test_small_quad_in_bands_matches_full_frame(void) {
+  // The band-equivalence test above uses a quad that spans most of the frame, so
+  // every band intersects it. This one is deliberately SMALL and centred, so most
+  // bands miss it entirely - which is the case that caught a clip folding an
+  // out-of-band triangle onto the band's edge row.
+  art::Image tex;
+  art::makePlaceholderCover(31337, 64, &tex);
+  gfx::Vec3 c[4];
+  const float h = 0.08f, z = 1.5f;
+  c[0] = {-h, -h, z};
+  c[1] = {h, -h * 0.9f, z + 0.12f};
+  c[2] = {h, h, z + 0.1f};
+  c[3] = {-h, h, z};
+
+  gfx::Framebuffer whole, banded;
+  whole.fill(0x0000);
+  banded.fill(0x0000);
+  gfx::Quad3D q1, q2;
+  gfx::Surface s = fullSurface(whole);
+  q1.draw(s, tex, c, 256, 255);
+
+  for (int y = 0; y < gfx::H; y += 20) {
+    gfx::Surface b;
+    b.px = banded.pixels() + static_cast<size_t>(y) * gfx::W;
+    b.w = gfx::W;
+    b.h = 20;
+    b.y0 = y;
+    q2.draw(b, tex, c, 256, 255);
+  }
+
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (whole.at(x, y) != banded.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
 
 void test_placeholder_cover_is_asymmetric_and_deterministic(void) {
   art::Image a, b;
@@ -1213,6 +1252,203 @@ void test_analyzer_rides_through_gaps_in_percussive_music(void) {
   TEST_ASSERT_EQUAL_INT(0, dropouts);
 }
 
+
+// ---------------------------------------------------------------------------
+// Gesture recognition
+//
+// A pure state machine, so every case is a synthetic trace. These are the
+// gestures the whole transport depends on: getting "a long press must not also
+// emit a tap" wrong means every like also toggles playback.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+using input::Gesture;
+using input::GestureRecognizer;
+
+// Runs a straight drag from (x0,y0) to (x1,y1) over `ms`, then releases.
+Gesture drag(int x0, int y0, int x1, int y1, uint32_t ms) {
+  GestureRecognizer g;
+  const int steps = 10;
+  uint32_t t = 1000;
+  g.update(true, x0, y0, t);
+  for (int i = 1; i <= steps; ++i) {
+    t = 1000 + ms * i / steps;
+    const int x = x0 + (x1 - x0) * i / steps;
+    const int y = y0 + (y1 - y0) * i / steps;
+    g.update(true, x, y, t);
+  }
+  return g.update(false, x1, y1, t + 1);
+}
+
+}  // namespace
+
+void test_gesture_tap_fires_on_release(void) {
+  GestureRecognizer g;
+  TEST_ASSERT_EQUAL(Gesture::None, g.update(true, 180, 180, 1000));
+  TEST_ASSERT_EQUAL(Gesture::None, g.update(true, 181, 180, 1100));
+  TEST_ASSERT_EQUAL(Gesture::Tap, g.update(false, 181, 180, 1200));
+}
+
+void test_gesture_long_press_fires_once_and_suppresses_the_tap(void) {
+  GestureRecognizer g;
+  g.update(true, 180, 180, 0);
+  TEST_ASSERT_EQUAL(Gesture::None,
+                    g.update(true, 180, 180, GestureRecognizer::LONG_MS - 1));
+  TEST_ASSERT_EQUAL(Gesture::LongPress,
+                    g.update(true, 180, 180, GestureRecognizer::LONG_MS));
+  // Only once while still held.
+  TEST_ASSERT_EQUAL(Gesture::None,
+                    g.update(true, 180, 180, GestureRecognizer::LONG_MS + 200));
+  // And the release must NOT also be a tap: that would make every like toggle
+  // playback as well.
+  TEST_ASSERT_EQUAL(Gesture::None,
+                    g.update(false, 180, 180, GestureRecognizer::LONG_MS + 400));
+}
+
+void test_gesture_swipes_resolve_by_direction(void) {
+  TEST_ASSERT_EQUAL(Gesture::SwipeRight, drag(120, 180, 260, 180, 250));
+  TEST_ASSERT_EQUAL(Gesture::SwipeLeft, drag(260, 180, 120, 180, 250));
+  TEST_ASSERT_EQUAL(Gesture::SwipeUp, drag(180, 260, 180, 120, 250));
+  TEST_ASSERT_EQUAL(Gesture::SwipeDown, drag(180, 120, 180, 260, 250));
+}
+
+void test_gesture_short_drag_is_a_tap_not_a_swipe(void) {
+  // Ten pixels of smear is a tap by a human finger, not an instruction.
+  TEST_ASSERT_EQUAL(Gesture::Tap, drag(180, 180, 190, 182, 150));
+}
+
+void test_gesture_diagonal_resolves_to_the_dominant_axis(void) {
+  // Mostly horizontal with vertical drift: one gesture, not two.
+  TEST_ASSERT_EQUAL(Gesture::SwipeRight, drag(120, 170, 260, 200, 250));
+  TEST_ASSERT_EQUAL(Gesture::SwipeDown, drag(170, 120, 200, 260, 250));
+}
+
+void test_gesture_swipe_that_curls_back_is_still_a_swipe(void) {
+  // The furthest travel counts, not the release point. Reading only where the
+  // finger lifted loses a flick that rebounds.
+  GestureRecognizer g;
+  g.update(true, 180, 180, 0);
+  g.update(true, 260, 180, 80);
+  g.update(true, 200, 180, 160);
+  TEST_ASSERT_EQUAL(Gesture::SwipeRight, g.update(false, 195, 180, 200));
+}
+
+void test_gesture_hold_at_the_end_of_a_drag_is_not_a_long_press(void) {
+  // Otherwise every slow swipe also likes the track.
+  GestureRecognizer g;
+  g.update(true, 120, 180, 0);
+  g.update(true, 260, 180, 200);
+  TEST_ASSERT_EQUAL(Gesture::None, g.update(true, 260, 180, 1200));
+  TEST_ASSERT_EQUAL(Gesture::SwipeRight, g.update(false, 260, 180, 1300));
+}
+
+void test_gesture_no_touch_reports_nothing(void) {
+  GestureRecognizer g;
+  for (uint32_t t = 0; t < 5000; t += 100)
+    TEST_ASSERT_EQUAL(Gesture::None, g.update(false, 0, 0, t));
+}
+
+void test_gesture_survives_the_millis_wrap(void) {
+  // Elapsed time is computed by unsigned subtraction, so a touch spanning the
+  // 49.7-day wrap must still time out correctly rather than never.
+  GestureRecognizer g;
+  g.update(true, 180, 180, 0xFFFFFF00u);
+  TEST_ASSERT_EQUAL(Gesture::LongPress, g.update(true, 180, 180, 0x00000200u));
+}
+
+
+// ---------------------------------------------------------------------------
+// RadialShell
+// ---------------------------------------------------------------------------
+
+void test_shell_drawn_in_bands_matches_full_frame(void) {
+  // The shell is drawn once per band on the device and once per frame on the
+  // desktop, and it only walks the arc segments that can reach the surface it is
+  // given. Two separate bugs came out of that optimisation - additive drawing
+  // not being idempotent, and the angular range being solved from the outer
+  // radius only - so the equivalence is asserted at several progress values
+  // rather than assumed.
+  for (int step = 0; step <= 8; ++step) {
+    const float p = static_cast<float>(step) / 8.0f;
+
+    gfx::Framebuffer whole, banded;
+    whole.fill(0x0000);
+    banded.fill(0x0000);
+
+    shell::RadialShell sh1, sh2;
+    gfx::Surface s = fullSurface(whole);
+    sh1.render(s, p, gfx::rgb565(60, 140, 230), 62, 1000, 0.5f);
+
+    for (int y = 0; y < gfx::H; y += 20) {
+      gfx::Surface b;
+      b.px = banded.pixels() + static_cast<size_t>(y) * gfx::W;
+      b.w = gfx::W;
+      b.h = 20;
+      b.y0 = y;
+      sh2.render(b, p, gfx::rgb565(60, 140, 230), 62, 1000, 0.5f);
+    }
+
+    int diffs = 0;
+    for (int y = 0; y < gfx::H; ++y)
+      for (int x = 0; x < gfx::W; ++x)
+        if (whole.at(x, y) != banded.at(x, y)) ++diffs;
+    TEST_ASSERT_EQUAL_INT(0, diffs);
+  }
+}
+
+void test_shell_progress_ring_grows_with_progress(void) {
+  int last = -1;
+  for (int step = 0; step <= 4; ++step) {
+    gfx::Framebuffer fb;
+    fb.fill(0x0000);
+    shell::RadialShell sh;
+    gfx::Surface s = fullSurface(fb);
+    sh.render(s, static_cast<float>(step) / 4.0f, gfx::rgb565(0, 200, 255), 62,
+              1000, 0.0f);
+    // Count pixels with a strong blue component: the tint, not the dark track.
+    int lit = 0;
+    for (int y = 0; y < gfx::H; ++y)
+      for (int x = 0; x < gfx::W; ++x) {
+        uint8_t r, g, b;
+        gfx::unpack565(fb.at(x, y), r, g, b);
+        if (b > 120) ++lit;
+      }
+    TEST_ASSERT_TRUE(lit > last);
+    last = lit;
+  }
+}
+
+void test_shell_unknown_volume_is_not_drawn_as_zero(void) {
+  // volume_pct of -1 means the active device did not report one. Drawing that
+  // as an empty ring would be a confident lie.
+  gfx::Framebuffer known, unknown;
+  known.fill(0x0000);
+  unknown.fill(0x0000);
+
+  shell::RadialShell a, b;
+  a.showVolume(0, 1000);
+  b.showVolume(-1, 1000);
+  gfx::Surface sk = fullSurface(known);
+  gfx::Surface su = fullSurface(unknown);
+  a.render(sk, 0.0f, 0x07FF, 0, 1000, 0.0f);
+  b.render(su, 0.0f, 0x07FF, -1, 1000, 0.0f);
+
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (known.at(x, y) != unknown.at(x, y)) ++diffs;
+  TEST_ASSERT_TRUE(diffs > 100);
+}
+
+void test_shell_volume_overlay_expires(void) {
+  shell::RadialShell sh;
+  sh.showVolume(50, 1000);
+  TEST_ASSERT_TRUE(sh.volumeVisible(1000));
+  TEST_ASSERT_TRUE(sh.volumeVisible(1000 + shell::RadialShell::VOLUME_SHOW_MS - 1));
+  TEST_ASSERT_FALSE(sh.volumeVisible(1000 + shell::RadialShell::VOLUME_SHOW_MS));
+}
+
 int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_framebuffer_is_360_square);
@@ -1252,6 +1488,7 @@ int main(int, char **) {
   RUN_TEST(test_quad_larger_than_the_screen_is_clipped);
   RUN_TEST(test_quad_alpha_zero_is_a_no_op);
   RUN_TEST(test_quad_drawn_in_bands_matches_a_single_full_frame);
+  RUN_TEST(test_small_quad_in_bands_matches_full_frame);
   RUN_TEST(test_placeholder_cover_is_asymmetric_and_deterministic);
   RUN_TEST(test_particles_pool_is_capped_and_does_not_overflow);
   RUN_TEST(test_particles_expire);
@@ -1285,5 +1522,18 @@ int main(int, char **) {
   RUN_TEST(test_analyzer_with_no_mic_at_all_still_animates);
   RUN_TEST(test_analyzer_handover_is_not_instant);
   RUN_TEST(test_analyzer_rides_through_gaps_in_percussive_music);
+  RUN_TEST(test_gesture_tap_fires_on_release);
+  RUN_TEST(test_gesture_long_press_fires_once_and_suppresses_the_tap);
+  RUN_TEST(test_gesture_swipes_resolve_by_direction);
+  RUN_TEST(test_gesture_short_drag_is_a_tap_not_a_swipe);
+  RUN_TEST(test_gesture_diagonal_resolves_to_the_dominant_axis);
+  RUN_TEST(test_gesture_swipe_that_curls_back_is_still_a_swipe);
+  RUN_TEST(test_gesture_hold_at_the_end_of_a_drag_is_not_a_long_press);
+  RUN_TEST(test_gesture_no_touch_reports_nothing);
+  RUN_TEST(test_gesture_survives_the_millis_wrap);
+  RUN_TEST(test_shell_drawn_in_bands_matches_full_frame);
+  RUN_TEST(test_shell_progress_ring_grows_with_progress);
+  RUN_TEST(test_shell_unknown_volume_is_not_drawn_as_zero);
+  RUN_TEST(test_shell_volume_overlay_expires);
   return UNITY_END();
 }

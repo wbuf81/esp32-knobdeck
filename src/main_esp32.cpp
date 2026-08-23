@@ -31,11 +31,14 @@
 #include "core/Rng.h"
 #include "gfx/Geometry.h"
 #include "gfx/Surface.h"
+#include "input/Gesture.h"
 #include "net/NetWorker.h"
 #include "platform/esp32/Bench.h"
 #include "platform/esp32/Boot.h"
+#include "platform/esp32/InputHw.h"
 #include "platform/esp32/Panel.h"
 #include "platform/esp32/Pins.h"
+#include "shell/RadialShell.h"
 #include "views/CoverLight.h"
 
 namespace {
@@ -47,6 +50,14 @@ audio::Modulation g_mod;
 core::FrameClock g_clock;
 core::Rng g_rng(0xC0FFEE);
 ProgressClock g_progress;
+shell::RadialShell g_shell;
+input::GestureRecognizer g_gesture;
+
+// Volume is tracked locally so a knob turn responds on the frame it happens,
+// and the value is pushed to Spotify coalesced. This is the ancestor's
+// optimistic-UI rule: the settle window in AppState stops an in-flight poll
+// from snapping the number back to what it was before the turn.
+int g_volume = -1;
 
 // Held for the life of the program: NetWorker keeps const char* into these.
 DeviceConfig g_cfg;
@@ -85,6 +96,18 @@ void setup() {
   } else {
     esp32::panelBacklight(210);
   }
+
+  // Input bring-up. The I2C scan runs first and unconditionally: the touch and
+  // encoder pins are community-sourced, and knowing what answers on the bus is
+  // the difference between "wrong pin" and "dead chip".
+  esp32::scanI2c();
+  Serial.printf("touch:   %s (chip id 0x%02X)\n",
+                esp32::touchBegin() ? "ok" : "NOT RESPONDING",
+                esp32::touchChipId());
+  Serial.printf("encoder: %s (a=%d b=%d)\n",
+                esp32::encoderBegin() ? "pcnt configured" : "FAILED",
+                pins::ENC_A, pins::ENC_B);
+  Serial.printf("haptics: %s\n", esp32::hapticsBegin() ? "ok" : "NOT RESPONDING");
 
   const uint32_t seed = fnv1a("first-light");
   g_view.begin(seed);
@@ -146,6 +169,63 @@ void loop() {
                   st.pb.title[0] ? st.pb.title : "(none)");
   }
 
+  // --- input ---
+  const int detents = esp32::encoderDelta();
+  if (detents != 0) {
+    if (g_volume < 0) g_volume = st.pb.volume_pct >= 0 ? st.pb.volume_pct : 50;
+    g_volume += detents * 2;
+    if (g_volume < 0) g_volume = 0;
+    if (g_volume > 100) g_volume = 100;
+    g_shell.showVolume(g_volume, now);
+    esp32::hapticsClick();
+    if (g_net) {
+      // Coalesced: a fast spin sends the final value once rather than forty
+      // times, which is what keeps the rate limit and the knob both happy.
+      Command c;
+      c.type = CommandType::SetVolume;
+      c.arg = g_volume;
+      g_net->submit(c);
+      g_net->mutate([](AppState &a) { a.settle_volume.arm(millis(), 1200); });
+    }
+    Serial.printf("knob: %+d -> volume %d%%\n", detents, g_volume);
+  } else if (st.pb.volume_pct >= 0 && !g_shell.volumeVisible(now)) {
+    g_volume = st.pb.volume_pct;  // resync once the local edit has settled
+  }
+
+  int tx = 0, ty = 0;
+  const bool touching = esp32::touchRead(&tx, &ty);
+  const input::Gesture g = g_gesture.update(touching, tx, ty, now);
+  if (g != input::Gesture::None) {
+    Serial.printf("touch: %s at (%d,%d)\n", input::gestureName(g), tx, ty);
+    Command c;
+    bool send = false;
+    switch (g) {
+      case input::Gesture::Tap:
+        c.type = CommandType::PlayPause;
+        send = true;
+        esp32::hapticsClick();
+        break;
+      case input::Gesture::SwipeLeft:
+        c.type = CommandType::Previous;
+        send = true;
+        esp32::hapticsBump();
+        break;
+      case input::Gesture::SwipeRight:
+        c.type = CommandType::Next;
+        send = true;
+        esp32::hapticsBump();
+        break;
+      case input::Gesture::LongPress:
+        c.type = CommandType::ToggleLike;
+        send = true;
+        esp32::hapticsBump();
+        break;
+      default:
+        break;
+    }
+    if (send && g_net) g_net->submit(c);
+  }
+
   g_analyzer.update(&g_mod, dt);
   g_mod.progress01 = st.pb.duration_ms
                          ? static_cast<float>(shown_progress) /
@@ -164,6 +244,10 @@ void loop() {
       s.h = esp32::PANEL_BAND_H;
       s.y0 = y;
       g_view.renderBand(s);
+      // The shell draws over the view, in the same band, before it is pushed.
+      g_shell.render(s, g_mod.progress01, g_view.tint(),
+                     g_volume >= 0 ? g_volume : st.pb.volume_pct, now,
+                     g_mod.bass);
       esp32::panelCommitBand();
     }
     esp32::panelEndFrame();

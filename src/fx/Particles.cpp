@@ -145,13 +145,20 @@ void Particles::render(gfx::Surface &s) const {
       const uint16_t c = fade(base, mul);
 
       const int yl = cy - half, yh = cy + half;
-      const int xl = cx - half, xh = cx + half;
+      int xl = cx - half, xh = cx + half;
+      // REJECT off-screen, do not clamp.
+      //
+      // Clamping an entirely off-screen square to [0, W-1] collapses it onto
+      // column 0 or 359, so every particle that drifts past the left or right
+      // of the disc leaves a bright dot stuck on the edge. Clipping has to
+      // discard, not squash.
+      if (xh < 0 || xl >= gfx::W) continue;
+      if (xl < 0) xl = 0;
+      if (xh >= gfx::W) xh = gfx::W - 1;
       for (int yy = yl; yy <= yh; ++yy) {
         if (!s.containsRow(yy)) continue;
         uint16_t *r = s.row(yy);
-        const int xa = iclamp(xl, 0, gfx::W - 1);
-        const int xb = iclamp(xh, 0, gfx::W - 1);
-        for (int xx = xa; xx <= xb; ++xx) r[xx] = addSat(r[xx], c);
+        for (int xx = xl; xx <= xh; ++xx) r[xx] = addSat(r[xx], c);
       }
     }
   }

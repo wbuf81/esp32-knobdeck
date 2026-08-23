@@ -44,6 +44,9 @@ void CoverLight::buildPalette(uint32_t seed) {
   // A tight analogous spread rather than the whole wheel. A palette drawn from
   // every hue reads as confetti; holding within about 50 degrees reads as light
   // of one colour, which is the point of the view.
+  // A mid-brightness, saturated version of the palette hue: readable against
+  // both a dark vignette and a bright cover, which a raw dominant colour is not.
+  tint_ = gfx::hsv565(hue_, 0.75f, 0.85f);
   for (int i = 0; i < 16; ++i) {
     const float t = static_cast<float>(i) / 15.0f;
     const float h = hue_ + (t - 0.5f) * 0.18f;

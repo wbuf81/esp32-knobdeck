@@ -38,6 +38,7 @@
 #include "platform/desktop/SdlPresent.h"
 #include "platform/desktop/WavMic.h"
 #include "art/Image.h"
+#include "shell/RadialShell.h"
 #include "views/CoverLight.h"
 
 namespace {
@@ -66,6 +67,7 @@ int main(int, char **) {
 
   gfx::Framebuffer fb;
   views::CoverLight view;
+  shell::RadialShell shell;
   audio::Modulation mod;
   core::Rng rng(0xC0FFEE);
 
@@ -109,6 +111,9 @@ int main(int, char **) {
     analyzer.update(&mod, dt);
     view.update(mod, dt, rng);
 
+    // A slow sweep so the progress ring is visible without playback state.
+    mod.progress01 = static_cast<float>(sim_ms % 90000) / 90000.0f;
+
     if (use_bands) {
       for (int y = 0; y < gfx::H; y += band_h) {
         gfx::Surface s;
@@ -117,6 +122,7 @@ int main(int, char **) {
         s.h = band_h;
         s.y0 = y;
         view.renderBand(s);
+        shell.render(s, mod.progress01, view.tint(), 62, sim_ms, mod.bass);
       }
     } else {
       gfx::Surface s;
@@ -125,6 +131,7 @@ int main(int, char **) {
       s.h = gfx::H;
       s.y0 = 0;
       view.renderBand(s);
+      shell.render(s, mod.progress01, view.tint(), 62, sim_ms, mod.bass);
     }
     view.endFrame();
 

@@ -55,6 +55,9 @@ class CoverLight {
   void endFrame() { bloom_.endFrame(); }
 
   int particleCount() const { return parts_.live(); }
+  // The album-derived accent colour, so the shell's progress ring belongs to
+  // the same image rather than being a fixed brand colour laid over it.
+  uint16_t tint() const { return tint_; }
   void setBloomStrength(uint8_t s) {
     bloom_.setStrength(s);
     bloom_locked_ = true;  // stop update() from overriding a deliberate override
@@ -129,6 +132,7 @@ class CoverLight {
   Ring rings_[MAX_RINGS];
 
   float hue_ = 0.0f;
+  uint16_t tint_ = 0xFFFF;
   float clock_ = 0.0f;
   float emit_acc_ = 0.0f;
   bool half_beat_pending_ = false;

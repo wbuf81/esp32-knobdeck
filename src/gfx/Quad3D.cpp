@@ -35,8 +35,21 @@ void Quad3D::triangle(Surface &s, const art::Image &tex, const Vert &a,
   if (c.sy < minyf) minyf = c.sy;
   if (c.sy > maxyf) maxyf = c.sy;
 
-  const int y0 = iclamp(ifloor(minyf), s.y0, s.yEnd() - 1);
-  const int y1 = iclamp(ifloor(maxyf) + 1, s.y0, s.yEnd() - 1);
+  // REJECT a triangle that misses this surface, do not clamp into it.
+  //
+  // Clamping ifloor(minyf) into [s.y0, s.yEnd()-1] means a triangle entirely
+  // below a band still gets one row processed - the band's edge row - and the
+  // per-row span solve occasionally yields a one-pixel span at x=0 or x=359
+  // there. The result was six pixels of difference between the banded and
+  // full-frame paths, stuck on the extreme columns.
+  //
+  // Exactly the same mistake as clamping an off-screen particle's x-range: a
+  // clip has to discard what falls outside, never fold it onto the boundary.
+  const int ty0 = ifloor(minyf);
+  const int ty1 = ifloor(maxyf) + 1;
+  if (ty1 < s.y0 || ty0 >= s.yEnd()) return;
+  const int y0 = ty0 > s.y0 ? ty0 : s.y0;
+  const int y1 = ty1 < s.yEnd() - 1 ? ty1 : s.yEnd() - 1;
   if (y1 < y0) return;
 
   // Edge functions, pre-multiplied by the area's sign so "inside" is simply all
