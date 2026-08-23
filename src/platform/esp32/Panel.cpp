@@ -21,6 +21,8 @@ constexpr size_t CHUNK_BYTES = 32768;
 
 spi_device_handle_t g_spi = nullptr;
 uint8_t *g_chunk[2] = {nullptr, nullptr};
+uint16_t *g_band[2] = {nullptr, nullptr};
+int g_band_slot = 0;
 spi_transaction_t g_trans[2];
 bool g_busy[2] = {false, false};
 int g_inflight = 0;
@@ -347,6 +349,8 @@ bool panelBegin() {
     return false;
   }
 
+  const size_t band_bytes =
+      static_cast<size_t>(gfx::W) * PANEL_BAND_H * sizeof(uint16_t);
   for (int i = 0; i < 2; ++i) {
     g_chunk[i] = static_cast<uint8_t *>(
         heap_caps_malloc(CHUNK_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
@@ -354,7 +358,17 @@ bool panelBegin() {
       Serial.println("panel: DMA staging buffer allocation failed");
       return false;
     }
+    // Bands must be in internal SRAM: it is DMA-capable, and the measurements
+    // put internal writes at 181 MB/s against PSRAM's hard 33 MB/s ceiling.
+    g_band[i] = static_cast<uint16_t *>(
+        heap_caps_malloc(band_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+    if (!g_band[i]) {
+      Serial.println("panel: internal band buffer allocation failed");
+      return false;
+    }
   }
+  Serial.printf("panel: 2 x %u B band buffers in internal SRAM\n",
+                (unsigned)band_bytes);
 
   // Hardware reset.
   digitalWrite(pins::LCD_RST, LOW);
@@ -386,17 +400,22 @@ void panelBeginFrame() {
   writeSingle(prefix, sizeof(prefix));
   g_inflight = 0;
   g_busy[0] = g_busy[1] = false;
+  g_band_slot = 0;
 }
 
-void panelPushBand(uint16_t *band, size_t pixel_count) {
-  swapInPlace(band, pixel_count);
-  // The band lives in internal SRAM, which is DMA-capable, so it is handed to
-  // the hardware directly - no staging copy. Slots alternate so one band can be
-  // streaming while the caller composites the next.
-  static int slot = 0;
-  waitSlot(slot);
-  queueQuad(band, pixel_count * 2, slot);
-  slot ^= 1;
+uint16_t *panelNextBand() {
+  waitSlot(g_band_slot);
+  return g_band[g_band_slot];
+}
+
+void panelCommitBand() {
+  const size_t px = static_cast<size_t>(gfx::W) * PANEL_BAND_H;
+  // The band lives in internal SRAM, which is DMA-capable, so it goes to the
+  // hardware directly with no staging copy. Slots alternate so one band streams
+  // out while the caller composites the next.
+  swapInPlace(g_band[g_band_slot], px);
+  queueQuad(g_band[g_band_slot], px * 2, g_band_slot);
+  g_band_slot ^= 1;
 }
 
 void panelEndFrame() {

@@ -33,15 +33,31 @@ void panelBacklight(uint8_t duty);
 void panelPushFrame(const uint16_t *native_endian);
 
 // --- band path, which is what the renderer actually uses ---
-// One frame is: beginFrame, then one pushBand per band top to bottom, then
-// endFrame. The address window is set once per frame and the pixel stream runs
-// as a single CS-low transaction across every band.
 //
-// pushBand byte-swaps the band IN PLACE and then hands it to DMA, so the caller
-// must ping-pong two band buffers and must not touch a band until the following
-// pushBand or endFrame returns.
+// The panel owns the two band buffers rather than the caller, because the hazard
+// here is invisible and expensive: commitBand byte-swaps a band in place and
+// hands it to DMA without waiting, so touching that memory again before the
+// hardware has finished streaming it corrupts the frame mid-push. Handing out
+// the buffer makes that impossible to get wrong at the call site.
+//
+// One frame is:
+//     panelBeginFrame();
+//     for each band:  uint16_t *b = panelNextBand();  ...draw...  panelCommitBand();
+//     panelEndFrame();
+//
+// The address window is set once per frame and the pixel stream is a single
+// CS-low transaction spanning every band.
+
+// Rows per band. 40 divides 360 into nine bands and is exactly ten rows of the
+// 90x90 bloom accumulator, so nothing straddles a boundary.
+constexpr int PANEL_BAND_H = 40;
+
 void panelBeginFrame();
-void panelPushBand(uint16_t *band_native_endian, size_t pixel_count);
+// Blocks until this band's previous DMA has completed, then returns it to draw
+// into. Bands are returned top to bottom, wrapping each frame.
+uint16_t *panelNextBand();
+// Byte-swaps the band just drawn and queues it. Do not touch that pointer after.
+void panelCommitBand();
 void panelEndFrame();
 
 // Microseconds the last frame's pixel stream occupied the bus.

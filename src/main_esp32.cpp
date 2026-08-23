@@ -4,20 +4,50 @@
 // has confirmed PSRAM is actually present and contiguous, because every later
 // stage assumes it and a wrong memory_type setting reports zero on perfectly
 // good hardware.
+//
+// The render loop is a band renderer with no framebuffer anywhere. Measured on
+// this board, PSRAM writes cap at 33 MB/s regardless of access width, so any
+// full-frame pass over a PSRAM framebuffer costs at least 7.5 ms and the
+// pipeline wanted six of them. Compositing 40-row bands in internal SRAM and
+// DMA-ing each straight to the panel never pays that cost at all.
 
 #include <Arduino.h>
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
 
+#include "audio/Modulation.h"
+#include "audio/Procedural.h"
+#include "core/FrameClock.h"
+#include "core/Hash.h"
+#include "core/Rng.h"
 #include "gfx/Geometry.h"
+#include "gfx/Surface.h"
 #include "platform/esp32/Bench.h"
 #include "platform/esp32/Boot.h"
 #include "platform/esp32/Panel.h"
 #include "platform/esp32/Pins.h"
-#include "platform/esp32/TestPattern.h"
+#include "views/CoverLight.h"
 
 namespace {
-uint16_t *g_fb = nullptr;
-bool g_panel_ok = false;
+
+views::CoverLight g_view;
+audio::Procedural g_proc;
+audio::Modulation g_mod;
+core::FrameClock g_clock;
+core::Rng g_rng(0xC0FFEE);
+bool g_ok = false;
+
+// Rolling timing, so the serial line reports what the render actually costs
+// rather than what it was estimated to cost.
+uint32_t g_frames = 0;
+uint64_t g_render_us = 0;
+uint64_t g_total_us = 0;
+uint64_t g_update_us = 0;
+uint64_t g_wait_us = 0;    // blocked waiting for a band's DMA to finish
+uint64_t g_commit_us = 0;  // byte swap + queue
+uint64_t g_drain_us = 0;   // end-of-frame drain
+uint64_t g_blur_us = 0;    // the 90x90 bloom blur
+
 }  // namespace
 
 void setup() {
@@ -28,53 +58,93 @@ void setup() {
   esp32::printBootBanner();
   esp32::runMemoryBenchmark();
 
-  Serial.println("stage 3: panel bring-up");
-  g_panel_ok = esp32::panelBegin();
-  if (!g_panel_ok) {
-    Serial.println("panel: FAILED to initialise. Check the pin map in Pins.h -");
-    Serial.println("every pin there is unconfirmed community data.");
+  Serial.println("stage 4: band renderer, Cover Light");
+  g_ok = esp32::panelBegin();
+  if (!g_ok) {
+    Serial.println("panel: FAILED. Check Pins.h - touch/encoder pins are still");
+    Serial.println("unconfirmed community data.");
     return;
   }
 
-  g_fb = static_cast<uint16_t *>(heap_caps_malloc(
-      static_cast<size_t>(gfx::W) * gfx::H * 2, MALLOC_CAP_SPIRAM));
-  if (!g_fb) {
-    Serial.println("panel: test framebuffer allocation failed");
-    return;
-  }
-
-  esp32::drawTestPattern(g_fb);
-  esp32::panelPushFrame(g_fb);
-  esp32::panelBacklight(200);
-  Serial.printf("panel: test pattern pushed in %lu us\n",
-                (unsigned long)esp32::panelLastPushUs());
-  Serial.println();
-  Serial.println("Look at the screen and report:");
-  Serial.println("  1. quadrants clockwise from top-left: RED GREEN WHITE BLUE?");
-  Serial.println("     (if red and blue are swapped, the BGR bit is wrong;");
-  Serial.println("      if they are rotated, MADCTL is wrong)");
-  Serial.println("  2. is the yellow wedge pointing UP?");
-  Serial.println("  3. is the white ring complete, not clipped on any side?");
-  Serial.println("  4. is the centre grey ramp smooth, 16 steps?");
+  g_proc.reseed(fnv1a("first-light"));
+  g_view.begin(fnv1a("first-light"));
+  esp32::panelBacklight(210);
+  Serial.printf("procedural tempo: %.1f bpm\n", g_proc.bpm());
+  Serial.printf("internal heap after setup: %lu, largest %lu\n",
+                (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned long)heap_caps_get_largest_free_block(
+                    MALLOC_CAP_INTERNAL));
 }
 
 void loop() {
-  static uint32_t last = 0;
-  static int frames = 0;
-
-  if (g_panel_ok && g_fb) {
-    // Re-push continuously to get a real sustained push rate, which is the
-    // number that decides whether the band renderer's budget is real.
-    esp32::panelPushFrame(g_fb);
-    ++frames;
+  if (!g_ok) {
+    delay(1000);
+    return;
   }
 
-  if (millis() - last >= 5000) {
+  const uint64_t t_frame = esp_timer_get_time();
+  const float dt = g_clock.tick(millis());
+
+  g_proc.fill(&g_mod, dt);
+  g_view.update(g_mod, dt, g_rng);
+
+  const uint64_t t_render = esp_timer_get_time();
+  g_update_us += t_render - t_frame;
+
+  esp32::panelBeginFrame();
+  for (int y = 0; y < gfx::H; y += esp32::PANEL_BAND_H) {
+    const uint64_t w0 = esp_timer_get_time();
+    gfx::Surface s;
+    s.px = esp32::panelNextBand();
+    const uint64_t w1 = esp_timer_get_time();
+    g_wait_us += w1 - w0;
+
+    s.w = gfx::W;
+    s.h = esp32::PANEL_BAND_H;
+    s.y0 = y;
+    g_view.renderBand(s);
+
+    const uint64_t c0 = esp_timer_get_time();
+    esp32::panelCommitBand();
+    g_commit_us += esp_timer_get_time() - c0;
+  }
+  const uint64_t d0 = esp_timer_get_time();
+  esp32::panelEndFrame();
+  g_drain_us += esp_timer_get_time() - d0;
+  const uint64_t b0 = esp_timer_get_time();
+  g_view.endFrame();
+  g_blur_us += esp_timer_get_time() - b0;
+
+  g_render_us += esp_timer_get_time() - t_render;
+  g_total_us += esp_timer_get_time() - t_frame;
+  ++g_frames;
+
+  static uint32_t last = 0;
+  if (millis() - last >= 3000) {
     last = millis();
-    Serial.printf("alive  uptime %lus  fps %.1f  push %lu us  int-heap %lu\n",
-                  (unsigned long)(millis() / 1000), frames / 5.0f,
-                  (unsigned long)esp32::panelLastPushUs(),
-                  (unsigned long)ESP.getFreeHeap());
-    frames = 0;
+    const float fps = g_frames * 1000000.0f / static_cast<float>(g_total_us);
+    auto &t = g_view.timing();
+    const float nb = t.frames ? static_cast<float>(t.frames) : 1.0f;
+    const float f = 1000.0f / g_frames;
+    Serial.printf(
+        "fps %5.1f frame %6.2f ms | upd %5.2f back %5.2f part %5.2f "
+        "accum %5.2f wait %5.2f swap %5.2f drain %5.2f blur %5.2f | "
+        "parts %4d heap %lu\n",
+        fps, g_total_us * f / 1000000.0f, g_update_us * f / 1000000.0f,
+        t.backdrop / 1000.0f / nb * 9.0f, t.particles / 1000.0f / nb * 9.0f,
+        t.bloom / 1000.0f / nb * 9.0f, g_wait_us * f / 1000000.0f,
+        g_commit_us * f / 1000000.0f, g_drain_us * f / 1000000.0f,
+        g_blur_us * f / 1000000.0f,
+        g_view.particleCount(),
+        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    g_frames = 0;
+    g_render_us = 0;
+    g_total_us = 0;
+    g_update_us = 0;
+    g_wait_us = 0;
+    g_commit_us = 0;
+    g_drain_us = 0;
+    g_blur_us = 0;
+    t = views::CoverLight::Timing();
   }
 }
