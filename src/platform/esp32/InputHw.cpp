@@ -12,11 +12,21 @@ namespace {
 constexpr uint8_t CST816_ADDR = 0x15;
 constexpr uint8_t DRV2605_ADDR = 0x5A;
 constexpr pcnt_unit_t ENC_UNIT = PCNT_UNIT_0;
+// Counts per physical detent. One: this encoder emits a single pulse per detent
+// on one line or the other, and only one edge of it is counted. Verified against
+// encoderRawCount() on hardware rather than assumed.
+constexpr int COUNTS_PER_DETENT = 1;
 
 bool g_touch_ok = false;
 uint8_t g_touch_id = 0;
 bool g_haptics_ok = false;
 int16_t g_last_count = 0;
+// Sub-detent counts not yet reported. Losing these was a real bug: a detent
+// produces about two quadrature counts, so integer-dividing each poll's delta
+// discarded everything below the threshold and a slow turn did nothing at all,
+// no matter how far it went.
+int g_accum = 0;
+int32_t g_raw_total = 0;
 
 bool readReg(uint8_t addr, uint8_t reg, uint8_t *buf, size_t n) {
   Wire.beginTransmission(addr);
@@ -76,25 +86,45 @@ void scanI2c() {
 }
 
 bool encoderBegin() {
-  // Full quadrature: count on both channels' edges, with each channel's level
-  // controlling the other's direction. That is what makes one physical detent
-  // one count in both directions rather than two counts one way and none back.
-  pcnt_config_t cfg = {};
-  cfg.pulse_gpio_num = pins::ENC_A;
-  cfg.ctrl_gpio_num = pins::ENC_B;
-  cfg.channel = PCNT_CHANNEL_0;
-  cfg.unit = ENC_UNIT;
-  cfg.pos_mode = PCNT_COUNT_INC;
-  cfg.neg_mode = PCNT_COUNT_DEC;
-  cfg.lctrl_mode = PCNT_MODE_REVERSE;
-  cfg.hctrl_mode = PCNT_MODE_KEEP;
-  cfg.counter_h_lim = 30000;
-  cfg.counter_l_lim = -30000;
-  if (pcnt_unit_config(&cfg) != ESP_OK) return false;
+  // This is NOT a quadrature encoder, despite looking like one on the schematic.
+  //
+  // Established on hardware, in two steps. First the pin trace: it rests with
+  // both contacts open at (1,1) and pulses them one at a time -
+  //
+  //   A=0 B=1 -> A=1 B=1        (one direction)
+  //   A=1 B=0 -> A=1 B=1        (the other)
+  //
+  // - never passing through (0,0). Then the counter: configured as 4x quadrature
+  // it oscillated -1, 0, -1, 0 and netted exactly zero, because both edges of a
+  // single A pulse were counted with opposite signs. In real quadrature B
+  // changes state between A's two edges, which is precisely what makes them
+  // count the same way; that they cancelled is the proof that B does not move.
+  //
+  // So each line is an independent direction pulse: count ONE edge per line, and
+  // let which line it was decide the sign.
+  pcnt_config_t ch0 = {};
+  ch0.pulse_gpio_num = pins::ENC_A;
+  ch0.ctrl_gpio_num = PCNT_PIN_NOT_USED;
+  ch0.channel = PCNT_CHANNEL_0;
+  ch0.unit = ENC_UNIT;
+  ch0.neg_mode = PCNT_COUNT_INC;  // falling edge on A: one step clockwise
+  ch0.pos_mode = PCNT_COUNT_DIS;  // the release is the same detent, not another
+  ch0.lctrl_mode = PCNT_MODE_KEEP;
+  ch0.hctrl_mode = PCNT_MODE_KEEP;
+  ch0.counter_h_lim = 30000;
+  ch0.counter_l_lim = -30000;
+  if (pcnt_unit_config(&ch0) != ESP_OK) return false;
 
-  // A mechanical encoder's contacts bounce. Without the hardware filter a
-  // single detent reads as a burst, which is the classic "my knob jumps ten
-  // steps" symptom.
+  pcnt_config_t ch1 = ch0;
+  ch1.pulse_gpio_num = pins::ENC_B;
+  ch1.channel = PCNT_CHANNEL_1;
+  ch1.neg_mode = PCNT_COUNT_DEC;  // falling edge on B: one step anticlockwise
+  ch1.pos_mode = PCNT_COUNT_DIS;
+  if (pcnt_unit_config(&ch1) != ESP_OK) return false;
+
+  // A mechanical encoder's contacts bounce. Without the hardware filter one
+  // detent reads as a burst, which is the classic "my knob jumps ten steps".
+  // The value is in APB cycles: 1000 at 80 MHz is 12.5 us.
   pcnt_set_filter_value(ENC_UNIT, 1000);
   pcnt_filter_enable(ENC_UNIT);
   pcnt_counter_pause(ENC_UNIT);
@@ -102,8 +132,12 @@ bool encoderBegin() {
   pcnt_counter_resume(ENC_UNIT);
   g_last_count = 0;
 
+  // The board has 10K pull-ups on both lines (schematic sheet 1, R59/R60); the
+  // internal ones cost nothing and make the pins defined if a variant omits them.
   gpio_set_pull_mode(static_cast<gpio_num_t>(pins::ENC_A), GPIO_PULLUP_ONLY);
   gpio_set_pull_mode(static_cast<gpio_num_t>(pins::ENC_B), GPIO_PULLUP_ONLY);
+  g_accum = 0;
+  g_raw_total = 0;
   return true;
 }
 
@@ -113,10 +147,33 @@ int encoderDelta() {
   // Signed 16-bit subtraction, so it is correct across the counter's wrap.
   const int d = static_cast<int16_t>(now - g_last_count);
   g_last_count = now;
-  // Four quadrature edges per detent on a typical mechanical encoder. Dividing
-  // here rather than in the caller keeps "one detent" meaning one thing
-  // everywhere above this.
-  return d / 4;
+  g_raw_total += d;
+
+  // Accumulate, then report whole detents and KEEP the remainder.
+  //
+  // This counts both edges of channel A with channel B selecting direction, so
+  // one quadrature cycle - one detent on an EC11 - is two counts. Dropping the
+  // remainder each poll meant a slow turn never accumulated to a whole detent
+  // and the knob appeared completely dead. Integer division truncating toward
+  // zero is what makes this correct in both directions.
+  g_accum += d;
+  const int detents = g_accum / COUNTS_PER_DETENT;
+  g_accum -= detents * COUNTS_PER_DETENT;
+  return detents;
+}
+
+int32_t encoderRawCount() { return g_raw_total; }
+
+void encoderPlainInputMode() {
+  pcnt_counter_pause(ENC_UNIT);
+  pinMode(pins::ENC_A, INPUT_PULLUP);
+  pinMode(pins::ENC_B, INPUT_PULLUP);
+}
+
+int encoderProbe() {
+  const int a = digitalRead(pins::ENC_A) ? 1 : 0;
+  const int b = digitalRead(pins::ENC_B) ? 1 : 0;
+  return (a << 1) | b;
 }
 
 bool touchBegin() {

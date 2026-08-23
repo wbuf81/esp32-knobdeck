@@ -28,6 +28,7 @@
 #include "audio/Procedural.h"
 #include "fx/Particles.h"
 #include "gfx/Quad3D.h"
+#include "gfx/fonts/Fonts.h"
 #include "input/Gesture.h"
 #include "shell/RadialShell.h"
 #include "gfx/Surface.h"
@@ -1449,6 +1450,169 @@ void test_shell_volume_overlay_expires(void) {
   TEST_ASSERT_FALSE(sh.volumeVisible(1000 + shell::RadialShell::VOLUME_SHOW_MS));
 }
 
+
+// ---------------------------------------------------------------------------
+// Text
+// ---------------------------------------------------------------------------
+
+namespace {
+
+int litPixels(const gfx::Framebuffer &fb) {
+  int n = 0;
+  for (size_t i = 0; i < gfx::Framebuffer::count(); ++i)
+    if (fb.pixels()[i] != 0) ++n;
+  return n;
+}
+
+// Renders one string and returns how many pixels it lit.
+int renderCount(const char *utf8) {
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  gfx::Surface s = fullSurface(fb);
+  gfx::drawText(s, gfx::fontTitle(), 40, 180, utf8, 0xFFFF);
+  return litPixels(fb);
+}
+
+}  // namespace
+
+void test_text_width_is_zero_for_empty_and_grows_with_length(void) {
+  TEST_ASSERT_EQUAL_INT(0, gfx::textWidth(gfx::fontTitle(), ""));
+  TEST_ASSERT_EQUAL_INT(0, gfx::textWidth(gfx::fontTitle(), nullptr));
+  const int a = gfx::textWidth(gfx::fontTitle(), "A");
+  const int aa = gfx::textWidth(gfx::fontTitle(), "AA");
+  TEST_ASSERT_TRUE(a > 0);
+  TEST_ASSERT_EQUAL_INT(a * 2, aa);  // monospace
+}
+
+void test_text_draws_inside_its_measured_box(void) {
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  gfx::Surface s = fullSurface(fb);
+  const int x = 40, baseline = 180;
+  gfx::drawText(s, gfx::fontTitle(), x, baseline, "Hello", 0xFFFF);
+
+  const int w = gfx::textWidth(gfx::fontTitle(), "Hello");
+  const int h = gfx::textHeight(gfx::fontTitle());
+  int minx = 999, maxx = -1, miny = 999, maxy = -1;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int px = 0; px < gfx::W; ++px)
+      if (fb.at(px, y) != 0) {
+        if (px < minx) minx = px;
+        if (px > maxx) maxx = px;
+        if (y < miny) miny = y;
+        if (y > maxy) maxy = y;
+      }
+  TEST_ASSERT_TRUE(maxx >= 0);           // something drew
+  TEST_ASSERT_TRUE(minx >= x - 2);       // no drawing left of the origin
+  TEST_ASSERT_TRUE(maxx <= x + w + 2);   // nor past the measured width
+  TEST_ASSERT_TRUE(maxy <= baseline + 4);  // descenders only just below
+  TEST_ASSERT_TRUE(miny >= baseline - h - 2);
+}
+
+void test_text_renders_latin1_accents_not_tofu(void) {
+  // The reason the fonts are generated at 0x20-0xFF. An ASCII-only face renders
+  // "Bjork" with an umlaut as a fallback glyph, and a device pointed at a real
+  // library meets that within the hour.
+  const int o = renderCount("o");
+  const int o_umlaut = renderCount("\xC3\xB6");  // U+00F6
+  const int question = renderCount("?");
+  TEST_ASSERT_TRUE(o_umlaut > 0);
+  // An umlaut is an o plus two dots, so strictly more ink than either.
+  TEST_ASSERT_TRUE(o_umlaut > o);
+  TEST_ASSERT_TRUE(o_umlaut != question);
+
+  // And a whole accented name renders wider than nothing, with no gaps.
+  TEST_ASSERT_TRUE(gfx::textWidth(gfx::fontTitle(), "Bj\xC3\xB6rk") >
+                   gfx::textWidth(gfx::fontTitle(), "Bjrk"));
+}
+
+void test_text_beyond_latin1_falls_back_visibly(void) {
+  // CJK is outside this font. It must render a visible marker rather than
+  // vanish: silently dropping characters makes a name look like bad metadata.
+  const int cjk = renderCount("\xE4\xB8\xAD");  // U+4E2D
+  const int question = renderCount("?");
+  TEST_ASSERT_TRUE(cjk > 0);
+  TEST_ASSERT_EQUAL_INT(question, cjk);
+}
+
+void test_text_malformed_utf8_terminates(void) {
+  // Spotify metadata is user-supplied. A truncated sequence must not walk the
+  // pointer off the end of the string.
+  TEST_ASSERT_TRUE(gfx::textWidth(gfx::fontTitle(), "\xC3") > 0);
+  TEST_ASSERT_TRUE(gfx::textWidth(gfx::fontTitle(), "\xFF\xFE") > 0);
+  TEST_ASSERT_TRUE(gfx::textWidth(gfx::fontTitle(), "ok\xC3") > 0);
+}
+
+void test_text_fit_truncates_within_the_budget(void) {
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  gfx::Surface s = fullSurface(fb);
+  const char *lng = "East Side of Sorrow - Live From Nashville";
+  const int max_w = 150;
+  const int drawn = gfx::drawTextFit(s, gfx::fontSmall(), 180, 180, lng, max_w,
+                                     0xFFFF);
+  TEST_ASSERT_TRUE(drawn > 0);
+  TEST_ASSERT_TRUE(drawn <= max_w);
+
+  // And a short string is not truncated at all.
+  const int shortw = gfx::textWidth(gfx::fontSmall(), "Hi");
+  TEST_ASSERT_EQUAL_INT(shortw,
+                        gfx::drawTextFit(s, gfx::fontSmall(), 180, 220, "Hi",
+                                         max_w, 0xFFFF));
+}
+
+void test_text_outside_the_surface_draws_nothing(void) {
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  gfx::Surface s;
+  s.px = fb.pixels();
+  s.w = gfx::W;
+  s.h = 20;
+  s.y0 = 0;
+  // Baseline far below this band.
+  gfx::drawText(s, gfx::fontTitle(), 40, 300, "Hello", 0xFFFF);
+  TEST_ASSERT_EQUAL_INT(0, litPixels(fb));
+}
+
+void test_text_drawn_in_bands_matches_full_frame(void) {
+  // A glyph is up to fifteen rows tall, so it straddles a twenty-row band. The
+  // bitstream index has to keep advancing through rows that are clipped away,
+  // or every glyph after the first band boundary decodes from the wrong offset.
+  const char *str = "East Side of Sorrow";
+  gfx::Framebuffer whole, banded;
+  whole.fill(0x0000);
+  banded.fill(0x0000);
+
+  gfx::Surface s = fullSurface(whole);
+  gfx::drawTextCentered(s, gfx::fontTitle(), 180, 195, str, 0xFFFF);
+
+  for (int y = 0; y < gfx::H; y += 20) {
+    gfx::Surface b;
+    b.px = banded.pixels() + static_cast<size_t>(y) * gfx::W;
+    b.w = gfx::W;
+    b.h = 20;
+    b.y0 = y;
+    gfx::drawTextCentered(b, gfx::fontTitle(), 180, 195, str, 0xFFFF);
+  }
+
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (whole.at(x, y) != banded.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+void test_half_chord_narrows_toward_the_poles(void) {
+  // The usable width on a round screen is much less than 360 anywhere but the
+  // middle, which is the whole reason text has to be measured against it.
+  TEST_ASSERT_TRUE(gfx::halfChordAt(gfx::CY, 0) >= gfx::RADIUS - 1);
+  const int mid = gfx::halfChordAt(gfx::CY + 120, 0);
+  const int far = gfx::halfChordAt(gfx::CY + 170, 0);
+  TEST_ASSERT_TRUE(mid < gfx::RADIUS);
+  TEST_ASSERT_TRUE(far < mid);
+  TEST_ASSERT_EQUAL_INT(0, gfx::halfChordAt(gfx::CY + gfx::RADIUS + 5, 0));
+}
+
 int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_framebuffer_is_360_square);
@@ -1535,5 +1699,14 @@ int main(int, char **) {
   RUN_TEST(test_shell_progress_ring_grows_with_progress);
   RUN_TEST(test_shell_unknown_volume_is_not_drawn_as_zero);
   RUN_TEST(test_shell_volume_overlay_expires);
+  RUN_TEST(test_text_width_is_zero_for_empty_and_grows_with_length);
+  RUN_TEST(test_text_draws_inside_its_measured_box);
+  RUN_TEST(test_text_renders_latin1_accents_not_tofu);
+  RUN_TEST(test_text_beyond_latin1_falls_back_visibly);
+  RUN_TEST(test_text_malformed_utf8_terminates);
+  RUN_TEST(test_text_fit_truncates_within_the_budget);
+  RUN_TEST(test_text_outside_the_surface_draws_nothing);
+  RUN_TEST(test_text_drawn_in_bands_matches_full_frame);
+  RUN_TEST(test_half_chord_narrows_toward_the_poles);
   return UNITY_END();
 }

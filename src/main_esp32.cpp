@@ -27,6 +27,7 @@
 #include "core/AppState.h"
 #include "core/FrameClock.h"
 #include "core/Hash.h"
+#include "core/Log.h"
 #include "core/ProgressClock.h"
 #include "core/Rng.h"
 #include "gfx/Geometry.h"
@@ -59,6 +60,15 @@ input::GestureRecognizer g_gesture;
 // optimistic-UI rule: the settle window in AppState stops an in-flight poll
 // from snapping the number back to what it was before the turn.
 int g_volume = -1;
+
+// Cumulative knob totals, reported in the periodic status line.
+//
+// Kept as running totals rather than logged per event so diagnosing the knob
+// does not require hitting a capture window: turn it whenever, read the numbers
+// afterwards. Coordinating a serial capture with a human turning a dial cost
+// three inconclusive rounds before this.
+long g_knob_edges = 0;    // pin transitions seen by the burst poll
+long g_knob_detents = 0;  // net detents PCNT reported
 
 // Held for the life of the program: NetWorker keeps const char* into these.
 DeviceConfig g_cfg;
@@ -93,7 +103,7 @@ void setup() {
 
   g_panel_ok = esp32::panelBegin();
   if (!g_panel_ok) {
-    Serial.println("panel: FAILED. Check Pins.h.");
+    LOGF("panel: FAILED. Check Pins.h.");
   } else {
     esp32::panelBacklight(210);
   }
@@ -102,13 +112,20 @@ void setup() {
   // encoder pins are community-sourced, and knowing what answers on the bus is
   // the difference between "wrong pin" and "dead chip".
   esp32::scanI2c();
-  Serial.printf("touch:   %s (chip id 0x%02X)\n",
+  LOGF("touch:   %s (chip id 0x%02X)",
                 esp32::touchBegin() ? "ok" : "NOT RESPONDING",
                 esp32::touchChipId());
-  Serial.printf("encoder: %s (a=%d b=%d)\n",
-                esp32::encoderBegin() ? "pcnt configured" : "FAILED",
-                pins::ENC_A, pins::ENC_B);
-  Serial.printf("haptics: %s\n", esp32::hapticsBegin() ? "ok" : "NOT RESPONDING");
+  LOGF("encoder: %s (a=%d b=%d)",
+       esp32::encoderBegin() ? "pcnt configured" : "FAILED", pins::ENC_A,
+       pins::ENC_B);
+  // NOT calling encoderPlainInputMode() here. It pauses the counter and takes
+  // the pins back with pinMode, so leaving it in place meant PCNT was never
+  // actually under test - the diagnostic was the reason the counter read zero.
+  // GPIO0 carries a 10K pull-up beside the encoder's on the schematic and this
+  // knob presses in, so it is the likely push switch. Read only: it is also the
+  // boot strapping pin.
+  pinMode(0, INPUT_PULLUP);
+  LOGF("haptics: %s", esp32::hapticsBegin() ? "ok" : "NOT RESPONDING");
 
   const uint32_t seed = fnv1a("first-light");
   g_view.begin(seed);
@@ -122,7 +139,7 @@ void setup() {
   // so a developer board keeps working with no setup step while a gifted one is
   // configured entirely through the portal.
   g_cfg = DeviceConfig::load();
-  Serial.printf("config: wifi=%s spotify=%s\n",
+  LOGF("config: wifi=%s spotify=%s",
                 g_cfg.wifi_ssid.empty() ? "MISSING" : "set",
                 g_cfg.refresh_token.empty() ? "MISSING" : "set");
 
@@ -133,9 +150,9 @@ void setup() {
     // No SD card wired up yet, so artwork will report unavailable rather than
     // silently failing - which is the distinction the ancestor's notes insist on.
     g_net->start("/sd/art", g_cfg.wifi_ssid.c_str(), g_cfg.wifi_password.c_str());
-    Serial.println("net: worker started on core 0");
+    LOGF("net: worker started on core 0");
   } else {
-    Serial.println("net: config incomplete; running visuals only");
+    LOGF("net: config incomplete; running visuals only");
   }
 }
 
@@ -164,7 +181,7 @@ void loop() {
     if (live && live != g_shown_cover) {
       g_shown_cover = live;
       g_view.setCover(live);
-      Serial.printf("cover: %dx%d live artwork\n", live->width(),
+      LOGF("cover: %dx%d live artwork", live->width(),
                     live->height());
     }
   }
@@ -182,12 +199,43 @@ void loop() {
     // album spends downloading made a working device look broken.
     g_shown_cover = nullptr;
     if (g_cover.valid()) g_view.setCover(&g_cover);
-    Serial.printf("track: %s - %s\n",
+    LOGF("track: %s - %s",
                   st.pb.artist[0] ? st.pb.artist : "(none)",
                   st.pb.title[0] ? st.pb.title : "(none)");
   }
 
   // --- input ---
+  // Raw counts are logged whenever they move, so the counts-per-detent figure
+  // can be confirmed against a known number of clicks.
+  {
+    static int32_t last_raw = 0;
+    const int32_t raw = esp32::encoderRawCount();
+    if (raw != last_raw) {
+      LOGF("knob raw: %ld (delta %+ld)", (long)raw,
+                    (long)(raw - last_raw));
+      last_raw = raw;
+    }
+    // Pin-level probe. Distinguishes a wrong pin from a wrong counter setup;
+    // without it those two failures are indistinguishable from the log.
+    static int last_probe = -1;
+    static uint32_t probe_reports = 0;
+    // Polled in a tight burst rather than once per frame. A detent's contact
+    // closure lasts milliseconds; one sample every 50 ms misses most of them,
+    // which looks exactly like a knob that is not wired up.
+    for (int i = 0; i < 600; ++i) {
+      const int probe = esp32::encoderProbe() | (digitalRead(0) ? 4 : 0);
+      if (probe != last_probe) {
+        last_probe = probe;
+        ++g_knob_edges;
+        if (probe_reports < 40) {
+          ++probe_reports;
+          LOGF("KNOB A=%d B=%d PUSH=%d", (probe >> 1) & 1, probe & 1,
+               (probe & 4) ? 0 : 1);
+        }
+      }
+      delayMicroseconds(40);
+    }
+  }
   const int detents = esp32::encoderDelta();
   if (detents != 0) {
     if (g_volume < 0) g_volume = st.pb.volume_pct >= 0 ? st.pb.volume_pct : 50;
@@ -205,7 +253,8 @@ void loop() {
       g_net->submit(c);
       g_net->mutate([](AppState &a) { a.settle_volume.arm(millis(), 1200); });
     }
-    Serial.printf("knob: %+d -> volume %d%%\n", detents, g_volume);
+    g_knob_detents += detents;
+    LOGF("knob: %+d -> volume %d%%", detents, g_volume);
   } else if (st.pb.volume_pct >= 0 && !g_shell.volumeVisible(now)) {
     g_volume = st.pb.volume_pct;  // resync once the local edit has settled
   }
@@ -214,7 +263,7 @@ void loop() {
   const bool touching = esp32::touchRead(&tx, &ty);
   const input::Gesture g = g_gesture.update(touching, tx, ty, now);
   if (g != input::Gesture::None) {
-    Serial.printf("touch: %s at (%d,%d)\n", input::gestureName(g), tx, ty);
+    LOGF("touch: %s at (%d,%d)", input::gestureName(g), tx, ty);
     Command c;
     bool send = false;
     switch (g) {
@@ -279,16 +328,17 @@ void loop() {
   if (now - last >= 3000) {
     last = now;
     const float fps = g_frames * 1000000.0f / static_cast<float>(g_total_us);
-    Serial.printf(
+    LOGF(
         "fps %5.1f | link %-13s %s %s | %d%% vol | %lu/%lu ms | parts %4d "
-        "| heap %lu psram %lu\n",
+        "| knob raw=%ld det=%ld edges=%ld | heap %lu psram %lu",
         fps, linkName(st.link), st.pb.is_playing ? "play" : "paus",
         st.pb.title[0] ? st.pb.title : "(nothing)", st.pb.volume_pct,
         (unsigned long)shown_progress, (unsigned long)st.pb.duration_ms,
-        g_view.particleCount(),
+        g_view.particleCount(), (long)esp32::encoderRawCount(),
+        g_knob_detents, g_knob_edges,
         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-    if (g_net && g_net->stalled(now)) Serial.println("net: task appears STALLED");
+    if (g_net && g_net->stalled(now)) LOGF("net: task appears STALLED");
     g_frames = 0;
     g_total_us = 0;
   }

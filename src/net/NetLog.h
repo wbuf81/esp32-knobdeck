@@ -9,6 +9,15 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "core/Log.h"
+
+namespace netlog {
+// Prefixes and forwards, so a net line is formatted and written exactly once.
+// Three separate printf calls per message is what let the render task's output
+// interleave into the middle of one.
+void line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+}  // namespace netlog
+
 inline bool netDebug() {
 #if !defined(DEVICE)
   static const bool on = std::getenv("SPOTIFY_DEBUG") != nullptr;
@@ -23,11 +32,9 @@ inline bool netDebug() {
 #endif
 }
 
-#define NETLOG(...)                        \
-  do {                                     \
-    if (netDebug()) {                      \
-      std::fprintf(stderr, "[net] ");      \
-      std::fprintf(stderr, __VA_ARGS__);   \
-      std::fprintf(stderr, "\n");          \
-    }                                      \
+#define NETLOG(...)                 \
+  do {                              \
+    if (netDebug()) {               \
+      ::netlog::line(__VA_ARGS__);  \
+    }                               \
   } while (0)
