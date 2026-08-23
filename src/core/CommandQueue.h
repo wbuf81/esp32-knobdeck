@@ -19,6 +19,7 @@ enum class CommandType : uint8_t {
   // spotify::Library and are picked up through its generation counter.
   FetchPlaylists,
   FetchTracks,      // uri = playlist uri, text = its name
+  FetchQueue,       // what is playing and what is coming up
   PlayFromContext,  // uri = playlist uri, arg = track offset within it
 };
 

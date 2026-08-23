@@ -66,6 +66,7 @@ class SpotifySource {
   void fetchPlaylists(AppState *out, uint32_t now_ms);
   void fetchTracks(const char *playlist_id, const char *playlist_uri,
                    const char *playlist_name, AppState *out, uint32_t now_ms);
+  void fetchQueue(AppState *out, uint32_t now_ms);
   void probeLibraryWrite(AppState *out, uint32_t now_ms);
 
   SpotifyAuth auth_;

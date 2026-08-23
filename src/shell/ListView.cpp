@@ -64,7 +64,7 @@ void fitInto(char *dst, size_t cap, const gfx::GFXfont &f, const char *src,
 }  // namespace
 
 void ListView::prepare(const char *const *items, int count, float pos,
-                       const char *heading, bool truncated) {
+                       const char *heading, bool truncated, const char *note) {
   row_count_ = 0;
   note_[0] = '\0';
   empty_ = count <= 0;
@@ -74,7 +74,8 @@ void ListView::prepare(const char *const *items, int count, float pos,
   heading_x_ = gfx::CX - gfx::textWidth(gfx::fontSmall(), heading_) / 2;
 
   if (empty_) {
-    fitInto(note_, sizeof(note_), gfx::fontArtist(), "empty",
+    fitInto(note_, sizeof(note_), gfx::fontArtist(),
+            note && note[0] ? note : "empty",
             gfx::halfChordAt(CENTRE_BASELINE, MARGIN) * 2);
     note_x_ = gfx::CX - gfx::textWidth(gfx::fontArtist(), note_) / 2;
     return;

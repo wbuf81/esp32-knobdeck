@@ -185,7 +185,12 @@ void SpotifySource::runCommand(const Command &c, AppState *out,
     case CommandType::FetchTracks:
       // c.uri is the playlist URI, c.text its name; the bare id is the tail of
       // the URI.
-      fetchTracks(c.arg >= 0 ? nullptr : nullptr, c.uri, c.text, out, now_ms);
+      // The bare id is derived from the URI inside fetchTracks; there is no
+      // separate id on the command.
+      fetchTracks(nullptr, c.uri, c.text, out, now_ms);
+      return;
+    case CommandType::FetchQueue:
+      fetchQueue(out, now_ms);
       return;
     case CommandType::PlayFromContext: {
       url = std::string(API) + "/me/player/play";
@@ -432,11 +437,38 @@ void SpotifySource::fetchTracks(const char *playlist_id,
 
   HttpResponse resp;
   if (!call("GET", url, "", &resp, out, now_ms)) return;
+
+  if (resp.status == 403) {
+    // Retry once WITHOUT fields=, to separate two causes that both answer a
+    // bare "Forbidden": the endpoint being unavailable to this app at all,
+    // versus the field filter being rejected. Worth one extra request, because
+    // only one of those is fixable here.
+    char plain[160];
+    std::snprintf(plain, sizeof(plain), "%s/playlists/%s/tracks?limit=%d", API,
+                  id, spotify::Library::MAX_TRACKS);
+    HttpResponse alt;
+    if (call("GET", plain, "", &alt, out, now_ms)) {
+      NETLOG("tracks retry without fields -> %d", alt.status);
+      if (alt.status == 200) {
+        NETLOG("  fields= was the problem, not the endpoint");
+        resp = alt;
+      }
+    }
+  }
+
   if (resp.status != 200) {
-    NETLOG("tracks -> %d", resp.status);
+    // The whole URL and the start of the body. A bare status cannot distinguish
+    // a refused playlist from a malformed request, and Spotify puts its reason
+    // in the body.
+    NETLOG("tracks -> %d url=%s", resp.status, url);
+    NETLOG("tracks body: %.180s", resp.body.c_str());
+    NETLOG("tracks playlist='%s' uri=%s id=%s",
+           playlist_name ? playlist_name : "?", playlist_uri, id);
+    library_->setTracksError(resp.status);
     library_->publishTracks(false);
     return;
   }
+  library_->setTracksError(0);
 
   JsonDocument doc;
   if (deserializeJson(doc, resp.body) != DeserializationError::Ok) {
@@ -459,6 +491,60 @@ void SpotifySource::fetchTracks(const char *playlist_id,
   const int total = doc["total"] | n;
   library_->publishTracks(total > n);
   NETLOG("tracks: %d of %d in %s", n, total, playlist_name ? playlist_name : "");
+}
+
+void SpotifySource::fetchQueue(AppState *out, uint32_t now_ms) {
+  if (!library_) return;
+
+  // What is playing and what is coming up.
+  //
+  // This exists because /playlists/{id}/tracks is refused to this app, and it is
+  // a better answer to "show me the current playlist" anyway: the queue is what
+  // will actually be played next, including anything queued by hand, where a
+  // playlist's track list is only where the queue happens to be drawn from.
+  //
+  // It also needs no scope beyond user-read-playback-state, which every build
+  // already has.
+  library_->clearTracks("", "UP NEXT");
+
+  HttpResponse resp;
+  const std::string url = std::string(API) + "/me/player/queue";
+  if (!call("GET", url, "", &resp, out, now_ms)) {
+    library_->publishTracks(false);
+    return;
+  }
+  if (resp.status != 200) {
+    NETLOG("queue -> %d", resp.status);
+    library_->setTracksError(resp.status);
+    library_->publishTracks(false);
+    return;
+  }
+  library_->setTracksError(0);
+
+  JsonDocument doc;
+  if (deserializeJson(doc, resp.body) != DeserializationError::Ok) {
+    NETLOG("queue: could not parse %u bytes", (unsigned)resp.body.size());
+    library_->publishTracks(false);
+    return;
+  }
+
+  int n = 0;
+  // The current track first, so the list reads as a position in something
+  // rather than as a detached list of what comes after.
+  JsonObjectConst cur = doc["currently_playing"];
+  if (!cur.isNull()) {
+    const char *name = cur["name"] | "";
+    if (name[0] && library_->addTrack(name, cur["uri"] | "", cur["id"] | ""))
+      ++n;
+  }
+  for (JsonObjectConst t : doc["queue"].as<JsonArrayConst>()) {
+    const char *name = t["name"] | "";
+    if (!name[0]) continue;
+    if (!library_->addTrack(name, t["uri"] | "", t["id"] | "")) break;
+    ++n;
+  }
+  library_->publishTracks(false);
+  NETLOG("queue: %d entries", n);
 }
 
 void SpotifySource::refreshLiked(AppState *out, uint32_t now_ms) {

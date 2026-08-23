@@ -333,6 +333,15 @@ void loop() {
             send = true;
             esp32::hapticsBump();
             break;
+          case input::Gesture::SwipeDown:
+            // Straight to what is coming up, without going through the chooser.
+            g_screen = Screen::Tracks;
+            g_sel = 0;
+            g_sel_pos = 0.0f;
+            c.type = CommandType::FetchQueue;
+            send = true;
+            esp32::hapticsBump();
+            break;
           case input::Gesture::SwipeUp:
             // Open the browser and ask for the listing. The list appears
             // immediately and empty rather than after the round trip, so the
@@ -353,34 +362,60 @@ void loop() {
         if (g == input::Gesture::Tap) {
           const spotify::Entry *e = g_library.playlist(g_sel);
           if (e) {
+            // Tapping a playlist PLAYS it, and then shows what is coming up.
+            //
+            // Not the drill-down this was first built as, because Spotify
+            // refuses this app access to /playlists/{id}/tracks - a bare 403 on
+            // every playlist, including the user's own. Starting a context and
+            // reading the queue both work, so the flow is built out of what the
+            // API actually permits rather than out of what would be tidier.
             std::strncpy(g_open_uri, e->uri, sizeof(g_open_uri) - 1);
             std::strncpy(g_open_name, e->name, sizeof(g_open_name) - 1);
+            c.type = CommandType::PlayFromContext;
+            std::strncpy(c.uri, e->uri, sizeof(c.uri) - 1);
+            c.arg = 0;
+            send = true;
+            esp32::hapticsBump();
+            // Queued behind the play, so the queue read reflects the new
+            // context rather than the old one.
+            if (g_net) {
+              Command q;
+              q.type = CommandType::FetchQueue;
+              g_net->submit(c);
+              g_net->submit(q);
+              send = false;  // already submitted, in order
+            }
             g_screen = Screen::Tracks;
             g_sel = 0;
             g_sel_pos = 0.0f;
-            c.type = CommandType::FetchTracks;
-            std::strncpy(c.uri, e->uri, sizeof(c.uri) - 1);
-            std::strncpy(c.text, e->name, sizeof(c.text) - 1);
-            send = true;
-            esp32::hapticsBump();
           }
         } else if (g == input::Gesture::SwipeDown) {
           g_screen = Screen::Player;
+          esp32::hapticsBump();
+        } else if (g == input::Gesture::SwipeUp) {
+          // Straight to the queue without choosing a playlist.
+          g_screen = Screen::Tracks;
+          g_sel = 0;
+          g_sel_pos = 0.0f;
+          c.type = CommandType::FetchQueue;
+          send = true;
           esp32::hapticsBump();
         }
         break;
 
       case Screen::Tracks:
         if (g == input::Gesture::Tap) {
-          if (g_library.trackCount() > 0 && g_open_uri[0]) {
-            // Played WITHIN the playlist, by offset, so the rest of it follows.
-            c.type = CommandType::PlayFromContext;
-            std::strncpy(c.uri, g_open_uri, sizeof(c.uri) - 1);
-            c.arg = g_sel;
-            send = true;
-            esp32::hapticsBump();
-            g_screen = Screen::Player;
+          // A status list, not a chooser: there is no way to jump into a queue
+          // by index, so tap keeps its usual meaning here.
+          if (g_net) {
+            g_net->mutate([](AppState &a) {
+              a.pb.is_playing = !a.pb.is_playing;
+              a.settle_playing.arm(millis(), 1500);
+            });
           }
+          c.type = CommandType::PlayPause;
+          send = true;
+          esp32::hapticsClick();
         } else if (g == input::Gesture::SwipeDown) {
           g_screen = Screen::Playlists;
           g_sel = 0;
@@ -430,10 +465,23 @@ void loop() {
           playlists ? g_library.playlist(i) : g_library.track(i);
       g_items[i] = e ? e->name : nullptr;
     }
-    g_list.prepare(g_items, n, g_sel_pos,
-                   playlists ? "PLAYLISTS" : g_open_name,
+    const char *note = nullptr;
+    if (!playlists && n == 0) {
+      const int err = g_library.tracksError();
+      // 403 and 404 on a playlist's tracks are almost always Spotify refusing
+      // an app access to one of its own algorithmic or editorial playlists,
+      // not a problem with this device or the token.
+      if (err == 403 || err == 404) note = "Spotify blocks this one";
+      else if (err) note = "could not load";
+    }
+    const char *heading =
+        playlists ? "PLAYLISTS"
+                  : (g_library.tracksOf()[0] ? g_library.tracksOf()
+                                             : g_open_name);
+    g_list.prepare(g_items, n, g_sel_pos, heading,
                    playlists ? g_library.playlistsTruncated()
-                             : g_library.tracksTruncated());
+                             : g_library.tracksTruncated(),
+                   note);
   }
 
   if (g_panel_ok) {

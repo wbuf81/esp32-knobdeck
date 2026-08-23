@@ -74,6 +74,7 @@ void Library::publishPlaylists(bool truncated) {
 void Library::clearTracks(const char *playlist_uri, const char *playlist_name) {
   fill_ = 0;
   tracks_truncated_ = false;
+  tracks_error_ = 0;
   // The count is zeroed and published BEFORE the fetch, so the list a stale
   // frame draws is empty rather than the previous playlist's tracks under this
   // playlist's title.

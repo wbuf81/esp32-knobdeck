@@ -40,6 +40,10 @@ class Library {
   void clearTracks(const char *playlist_uri, const char *playlist_name);
   bool addTrack(const char *name, const char *uri, const char *id);
   void publishTracks(bool truncated);
+  // Non-zero means the last track fetch failed with this HTTP status. The
+  // browser must say so: an empty list and a refused list look identical on
+  // screen, and one of them is not the user's fault.
+  void setTracksError(int status) { tracks_error_ = status; }
 
   // --- render task ---
   uint32_t generation() const { return generation_.load(); }
@@ -51,6 +55,7 @@ class Library {
   const char *tracksUri() const { return tracks_of_uri_; }
   bool playlistsTruncated() const { return playlists_truncated_; }
   bool tracksTruncated() const { return tracks_truncated_; }
+  int tracksError() const { return tracks_error_; }
 
  private:
   Entry *playlists_ = nullptr;
@@ -60,6 +65,7 @@ class Library {
   int fill_ = 0;  // how many entries the net task has written so far
   bool playlists_truncated_ = false;
   bool tracks_truncated_ = false;
+  int tracks_error_ = 0;
   char tracks_of_uri_[52] = {};
   char tracks_of_name_[52] = {};
   std::atomic<uint32_t> generation_{0};

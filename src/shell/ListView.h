@@ -34,8 +34,11 @@ class ListView {
   static constexpr int MARGIN = 26;
 
   // Once per frame. `pos` is the fractional selected index.
+  // `note` replaces the list body when there is nothing to show - "empty" is
+  // not the same message as "Spotify will not let an app read this one", and
+  // showing the first for the second blames the wrong party.
   void prepare(const char *const *items, int count, float pos,
-               const char *heading, bool truncated);
+               const char *heading, bool truncated, const char *note = nullptr);
   // Once per band.
   void render(gfx::Surface &s, uint16_t tint) const;
 
