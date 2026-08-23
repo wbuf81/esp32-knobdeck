@@ -32,10 +32,15 @@ class CoverCache {
   // Spotify's 300px covers run 20-40 KB. The cap is generous enough for the
   // 640px variant and small enough that a wrong URL cannot eat PSRAM.
   static constexpr size_t MAX_JPEG_BYTES = 400 * 1024;
-  // Decoded size ceiling. The cover draws about 100 px tall, so 320 leaves
-  // plenty of detail for a tilt toward the camera without paying for pixels
-  // nothing can show.
-  static constexpr int MAX_DIM = 320;
+  // Decoded size ceiling.
+  //
+  // The cover draws about 100 px tall, and 320 was simply wasted: Quad3D does
+  // four bilinear texture reads per rasterised pixel, straight out of PSRAM, so
+  // texture size shows up directly as read bandwidth and cache misses. Decoding
+  // Spotify's 300px art at 320 cost roughly 20 ms a frame against 192, for
+  // detail a hundred-pixel quad cannot show. tjpgd scales by powers of two, so
+  // this lands on 150x150 - still an oversample of what is drawn.
+  static constexpr int MAX_DIM = 192;
 
   // Net task. Returns the album id on success and an empty string on failure -
   // the caller treats that as "no artwork", which must render deliberately.

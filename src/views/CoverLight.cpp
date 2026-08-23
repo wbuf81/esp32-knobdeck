@@ -256,10 +256,14 @@ void CoverLight::drawCover(gfx::Surface &s) {
 void CoverLight::update(const audio::Modulation &m, float dt, core::Rng &rng) {
   clock_ += dt;
 
-  // Slow, continuous, and never still. A cover that stops moving looks like the
-  // firmware hung.
-  orbit_ = clock_ * 0.19f;
-  tilt_ = std::sin(clock_ * 0.31f) * 0.22f;
+  // A bounded sway, NOT a continuous revolution.
+  //
+  // orbit_ used to grow without limit, so the cover turned fully edge-on twice
+  // per revolution and all but vanished. An album cover is the subject of this
+  // view; it should never disappear. +-0.5 rad is enough perspective for the
+  // near edge to read as nearer without ever losing the face.
+  orbit_ = std::sin(clock_ * 0.23f) * 0.50f;
+  tilt_ = std::sin(clock_ * 0.31f + 1.1f) * 0.20f;
   // 0.21 puts the cover at roughly 100 px tall on screen. Larger was tried at
   // 0.30 and the cover plus its reflection ran off the top and bottom of the
   // disc - a round screen has far less usable vertical extent than its pixel

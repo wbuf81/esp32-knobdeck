@@ -39,6 +39,7 @@
 #include "platform/esp32/InputHw.h"
 #include "platform/esp32/Panel.h"
 #include "platform/esp32/Pins.h"
+#include "shell/NowPlaying.h"
 #include "shell/RadialShell.h"
 #include "views/CoverLight.h"
 
@@ -53,6 +54,7 @@ core::FrameClock g_clock;
 core::Rng g_rng(0xC0FFEE);
 ProgressClock g_progress;
 shell::RadialShell g_shell;
+shell::NowPlaying g_nowplaying;
 input::GestureRecognizer g_gesture;
 
 // Volume is tracked locally so a knob turn responds on the frame it happens,
@@ -79,6 +81,8 @@ char g_track[ID_LEN] = {};
 
 uint32_t g_frames = 0;
 uint64_t g_total_us = 0;
+uint64_t g_shell_us = 0;  // rings
+uint64_t g_text_us = 0;   // title, artist, timecodes
 
 const char *linkName(LinkStatus s) {
   switch (s) {
@@ -205,37 +209,11 @@ void loop() {
   }
 
   // --- input ---
-  // Raw counts are logged whenever they move, so the counts-per-detent figure
-  // can be confirmed against a known number of clicks.
-  {
-    static int32_t last_raw = 0;
-    const int32_t raw = esp32::encoderRawCount();
-    if (raw != last_raw) {
-      LOGF("knob raw: %ld (delta %+ld)", (long)raw,
-                    (long)(raw - last_raw));
-      last_raw = raw;
-    }
-    // Pin-level probe. Distinguishes a wrong pin from a wrong counter setup;
-    // without it those two failures are indistinguishable from the log.
-    static int last_probe = -1;
-    static uint32_t probe_reports = 0;
-    // Polled in a tight burst rather than once per frame. A detent's contact
-    // closure lasts milliseconds; one sample every 50 ms misses most of them,
-    // which looks exactly like a knob that is not wired up.
-    for (int i = 0; i < 600; ++i) {
-      const int probe = esp32::encoderProbe() | (digitalRead(0) ? 4 : 0);
-      if (probe != last_probe) {
-        last_probe = probe;
-        ++g_knob_edges;
-        if (probe_reports < 40) {
-          ++probe_reports;
-          LOGF("KNOB A=%d B=%d PUSH=%d", (probe >> 1) & 1, probe & 1,
-               (probe & 4) ? 0 : 1);
-        }
-      }
-      delayMicroseconds(40);
-    }
-  }
+  //
+  // No pin-level polling here any more. The burst that proved the encoder pins
+  // move - 600 samples at 40us - cost 24 ms of every frame, which was most of a
+  // 12 fps frame time and by far the largest single cost in the renderer. PCNT
+  // counts in hardware; nothing needs to watch the pins.
   const int detents = esp32::encoderDelta();
   if (detents != 0) {
     if (g_volume < 0) g_volume = st.pb.volume_pct >= 0 ? st.pb.volume_pct : 50;
@@ -302,6 +280,9 @@ void loop() {
 
   g_view.update(g_mod, dt, g_rng);
 
+  // Measured, truncated and formatted once per frame, not once per band.
+  g_nowplaying.prepare(st.pb, shown_progress);
+
   if (g_panel_ok) {
     esp32::panelBeginFrame();
     for (int y = 0; y < gfx::H; y += esp32::PANEL_BAND_H) {
@@ -312,9 +293,15 @@ void loop() {
       s.y0 = y;
       g_view.renderBand(s);
       // The shell draws over the view, in the same band, before it is pushed.
+      const uint64_t sh0 = esp_timer_get_time();
       g_shell.render(s, g_mod.progress01, g_view.tint(),
                      g_volume >= 0 ? g_volume : st.pb.volume_pct, now,
                      g_mod.bass);
+      const uint64_t sh1 = esp_timer_get_time();
+      g_nowplaying.render(s, g_view.tint());
+      const uint64_t sh2 = esp_timer_get_time();
+      g_shell_us += sh1 - sh0;
+      g_text_us += sh2 - sh1;
       esp32::panelCommitBand();
     }
     esp32::panelEndFrame();
@@ -328,18 +315,27 @@ void loop() {
   if (now - last >= 3000) {
     last = now;
     const float fps = g_frames * 1000000.0f / static_cast<float>(g_total_us);
+    auto &vt = g_view.timing();
     LOGF(
         "fps %5.1f | link %-13s %s %s | %d%% vol | %lu/%lu ms | parts %4d "
-        "| knob raw=%ld det=%ld edges=%ld | heap %lu psram %lu",
+        "| back %5.2f cover %5.2f part %5.2f accum %5.2f shell %5.2f "
+        "text %5.2f | heap %lu psram %lu",
         fps, linkName(st.link), st.pb.is_playing ? "play" : "paus",
         st.pb.title[0] ? st.pb.title : "(nothing)", st.pb.volume_pct,
         (unsigned long)shown_progress, (unsigned long)st.pb.duration_ms,
-        g_view.particleCount(), (long)esp32::encoderRawCount(),
-        g_knob_detents, g_knob_edges,
+        g_view.particleCount(),
+        vt.frames ? vt.backdrop / 1000.0f / vt.frames * 18.0f : 0.0f,
+        vt.frames ? vt.cover / 1000.0f / vt.frames * 18.0f : 0.0f,
+        vt.frames ? vt.particles / 1000.0f / vt.frames * 18.0f : 0.0f,
+        vt.frames ? vt.bloom / 1000.0f / vt.frames * 18.0f : 0.0f,
+        g_shell_us / 1000.0f / g_frames, g_text_us / 1000.0f / g_frames,
         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     if (g_net && g_net->stalled(now)) LOGF("net: task appears STALLED");
     g_frames = 0;
     g_total_us = 0;
+    g_shell_us = 0;
+    g_text_us = 0;
+    vt = views::CoverLight::Timing();
   }
 }

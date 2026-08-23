@@ -38,6 +38,8 @@
 #include "platform/desktop/SdlPresent.h"
 #include "platform/desktop/WavMic.h"
 #include "art/Image.h"
+#include "core/PlaybackState.h"
+#include "shell/NowPlaying.h"
 #include "shell/RadialShell.h"
 #include "views/CoverLight.h"
 
@@ -68,6 +70,18 @@ int main(int, char **) {
   gfx::Framebuffer fb;
   views::CoverLight view;
   shell::RadialShell shell;
+  shell::NowPlaying nowplaying;
+
+  // A stand-in track so the text layout can be judged without a network. The
+  // accented name is deliberate: it is the case the Latin-1 font range exists
+  // for, and it should look right rather than like broken metadata.
+  PlaybackState fake;
+  fake.has_track = true;
+  fake.is_playing = true;
+  setStr(fake.title, TEXT_LEN, "East Side of Sorrow - Live From Nashville");
+  setStr(fake.artist, TEXT_LEN, "Bj\xc3\xb6rk & Sigur R\xc3\xb3s");
+  fake.duration_ms = 264148;
+  fake.volume_pct = 62;
   audio::Modulation mod;
   core::Rng rng(0xC0FFEE);
 
@@ -113,6 +127,9 @@ int main(int, char **) {
 
     // A slow sweep so the progress ring is visible without playback state.
     mod.progress01 = static_cast<float>(sim_ms % 90000) / 90000.0f;
+    const uint32_t shown =
+        static_cast<uint32_t>(mod.progress01 * fake.duration_ms);
+    nowplaying.prepare(fake, shown);
 
     if (use_bands) {
       for (int y = 0; y < gfx::H; y += band_h) {
@@ -123,6 +140,7 @@ int main(int, char **) {
         s.y0 = y;
         view.renderBand(s);
         shell.render(s, mod.progress01, view.tint(), 62, sim_ms, mod.bass);
+        nowplaying.render(s, view.tint());
       }
     } else {
       gfx::Surface s;
@@ -132,6 +150,7 @@ int main(int, char **) {
       s.y0 = 0;
       view.renderBand(s);
       shell.render(s, mod.progress01, view.tint(), 62, sim_ms, mod.bass);
+      nowplaying.render(s, view.tint());
     }
     view.endFrame();
 
