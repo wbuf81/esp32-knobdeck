@@ -43,6 +43,7 @@
 #include "platform/esp32/InputHw.h"
 #include "platform/esp32/Panel.h"
 #include "platform/esp32/Pins.h"
+#include "shell/ConfirmRing.h"
 #include "shell/ListView.h"
 #include "shell/NowPlaying.h"
 #include "shell/RadialShell.h"
@@ -61,6 +62,7 @@ ProgressClock g_progress;
 shell::RadialShell g_shell;
 shell::NowPlaying g_nowplaying;
 shell::ListView g_list;
+shell::ConfirmRing g_confirm;
 spotify::Library g_library;
 
 // Which screen is up.
@@ -68,7 +70,10 @@ spotify::Library g_library;
 // Deliberately a plain enum and a couple of ints rather than a screen stack:
 // there are three states and one way between each pair, and a stack would be
 // machinery for navigation this device does not have.
-enum class Screen : uint8_t { Player, Playlists, Tracks };
+// Confirm is a leaf off Tracks and nothing else: you can only arrive from a tap
+// on a queue row, and both answers leave immediately. Still flat, still one way
+// between each pair.
+enum class Screen : uint8_t { Player, Playlists, Tracks, Confirm };
 Screen g_screen = Screen::Player;
 
 int g_sel = 0;            // the selected row
@@ -76,6 +81,13 @@ float g_sel_pos = 0.0f;   // eased position, so the wheel glides to it
 uint32_t g_lib_gen = 0;   // last library generation the UI laid out
 char g_open_uri[52] = {};
 char g_open_name[52] = {};
+
+// The pending jump. The row is remembered rather than the name, because the
+// queue can be republished underneath the confirmation and the row is what the
+// command needs anyway.
+int g_confirm_row = 0;
+int g_confirm_yes = 0;        // 0 = cancel, 1 = play
+float g_confirm_pos = 0.0f;   // eased, so the marker glides like the list does
 
 // Item pointers handed to the list. Rebuilt each frame, which is 32 pointer
 // stores - far cheaper than any way of keeping it in sync.
@@ -286,6 +298,10 @@ void loop() {
         g_net->mutate([](AppState &a) { a.settle_volume.arm(millis(), 1200); });
       }
       LOGF("knob: %+d -> volume %d%%", detents, g_volume);
+    } else if (g_screen == Screen::Confirm) {
+      // Two positions, so any turn in a direction lands on that answer rather
+      // than accumulating a count nobody can see.
+      g_confirm_yes = detents > 0 ? 1 : 0;
     } else {
       // Clamped rather than wrapped. On a list you cannot see the ends of,
       // wrapping from the last item to the first feels like a glitch.
@@ -444,13 +460,25 @@ void loop() {
         break;
 
       case Screen::Tracks:
-        // Tap does NOTHING here, deliberately.
+        // Tap asks before it acts.
         //
-        // This is a status list, not a chooser: Spotify offers no way to jump
-        // into a queue by index, so any tap action would be pretending. It used
-        // to toggle playback, which made one gesture mean "select" on one screen
-        // and "play/pause" on the next.
-        if (g == input::Gesture::SwipeDown) {
+        // A jump is destructive in a way the other gestures are not - it throws
+        // away everything between here and there - and the rows are 33px apart
+        // on a surface you are also using to hold the device. So the tap opens a
+        // confirmation rather than firing.
+        //
+        // Row 0 is the track already playing, so it is not a jump and does
+        // nothing, rather than asking a question with no meaningful answer.
+        if (g == input::Gesture::Tap && g_sel > 0) {
+          const spotify::Entry *e = g_library.track(g_sel);
+          if (e && e->uri[0]) {
+            g_confirm_row = g_sel;
+            g_confirm_yes = 0;  // opens on cancel: a mis-tap costs nothing
+            g_confirm_pos = 0.0f;
+            g_screen = Screen::Confirm;
+            esp32::hapticsBump();
+          }
+        } else if (g == input::Gesture::SwipeDown) {
           // Straight to the player, not back to the chooser. Both browser
           // screens are siblings reached from the player - up for playlists,
           // down for the queue - so one swipe always gets you home.
@@ -460,13 +488,54 @@ void loop() {
           esp32::hapticsBump();
         }
         break;
+
+      case Screen::Confirm:
+        if (g == input::Gesture::Tap) {
+          const spotify::Entry *e = g_library.track(g_confirm_row);
+          if (g_confirm_yes && e && e->uri[0]) {
+            c.type = CommandType::PlayQueueItem;
+            std::strncpy(c.uri, e->uri, sizeof(c.uri) - 1);
+            // Row 0 is the track playing, so the row index IS the number of
+            // skips the fallback needs.
+            c.arg = g_confirm_row;
+            send = true;
+            esp32::hapticsClick();
+            // Straight to the player, same as picking a playlist: you asked for
+            // a song, the answer is the song.
+            g_screen = Screen::Player;
+            g_sel = 0;
+            g_sel_pos = 0.0f;
+          } else {
+            // Cancelled. Back to the queue with the row still under the
+            // selection, so a mis-tap does not also lose your place.
+            g_screen = Screen::Tracks;
+            esp32::hapticsBump();
+          }
+        } else if (g == input::Gesture::SwipeDown) {
+          // Down still means back, everywhere in the browser.
+          g_screen = Screen::Tracks;
+          esp32::hapticsBump();
+        }
+        break;
     }
     if (send && g_net) g_net->submit(c);
   }
 
+  // The marker eases to the answer for the same reason the list does: a snap
+  // between two ends reads as a redraw, a glide reads as something you moved.
+  {
+    const float target = static_cast<float>(g_confirm_yes);
+    const float k = 1.0f - std::exp(-dt * 16.0f);
+    g_confirm_pos += (target - g_confirm_pos) * k;
+    if (std::fabs(target - g_confirm_pos) < 0.002f) g_confirm_pos = target;
+  }
+
   // A fresh listing resets the selection: keeping row 7 selected while the list
   // underneath it changed would point at something the user never chose.
-  if (g_screen != Screen::Player) {
+  //
+  // Not on Confirm: the jump republishes the queue, and that must not yank the
+  // row out from under the question being asked about it.
+  if (g_screen == Screen::Playlists || g_screen == Screen::Tracks) {
     const uint32_t gen = g_library.generation();
     if (gen != g_lib_gen) {
       g_lib_gen = gen;
@@ -494,6 +563,9 @@ void loop() {
   // Measured, truncated and formatted once per frame, not once per band.
   if (g_screen == Screen::Player) {
     g_nowplaying.prepare(st.pb, shown_progress);
+  } else if (g_screen == Screen::Confirm) {
+    const spotify::Entry *e = g_library.track(g_confirm_row);
+    g_confirm.prepare(e ? e->name : nullptr, g_confirm_pos);
   } else {
     const bool playlists = g_screen == Screen::Playlists;
     const int n = listCount();
@@ -543,6 +615,7 @@ void loop() {
                      g_mod.bass);
       const uint64_t sh1 = esp_timer_get_time();
       if (g_screen == Screen::Player) g_nowplaying.render(s, g_view.tint());
+      else if (g_screen == Screen::Confirm) g_confirm.render(s, g_view.tint());
       else g_list.render(s, g_view.tint());
       const uint64_t sh2 = esp_timer_get_time();
       g_shell_us += sh1 - sh0;

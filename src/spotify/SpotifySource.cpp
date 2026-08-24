@@ -39,6 +39,7 @@ void buildPlayerFilter(JsonDocument *filter) {
   (*filter)["progress_ms"] = true;
   (*filter)["device"]["name"] = true;
   (*filter)["device"]["volume_percent"] = true;
+  (*filter)["context"]["uri"] = true;
   (*filter)["item"]["id"] = true;
   (*filter)["item"]["name"] = true;
   (*filter)["item"]["duration_ms"] = true;
@@ -192,6 +193,9 @@ void SpotifySource::runCommand(const Command &c, AppState *out,
     case CommandType::FetchQueue:
       fetchQueue(out, now_ms);
       return;
+    case CommandType::PlayQueueItem:
+      playQueueItem(c, out, now_ms);
+      return;
     case CommandType::PlayFromContext: {
       url = std::string(API) + "/me/player/play";
       method = "PUT";
@@ -284,6 +288,12 @@ void SpotifySource::pollPlayer(AppState *out, uint32_t now_ms) {
     next_poll_.arm(now_ms, POLL_PAUSED_MS);
     return;
   }
+
+  // Remembered for the queue jump. A null context is normal - a bare track or
+  // autoplay radio has none - and is exactly the case the jump has to fall back
+  // for, so it is recorded as empty rather than left stale from the last
+  // playlist.
+  context_uri_ = doc["context"]["uri"] | "";
 
   out->pb.has_track = true;
   out->pb.has_device = true;
@@ -509,10 +519,17 @@ void SpotifySource::fetchQueue(AppState *out, uint32_t now_ms) {
 
   HttpResponse resp;
   const std::string url = std::string(API) + "/me/player/queue";
+  // Timed on every fetch. Measured: the body is ~71KB and the round trip ~750ms
+  // with no available_markets to strip - market= and additional_types= were both
+  // tried and neither shrinks it - so this line exists to catch the case where
+  // it is instead multiple seconds, which has been seen once and not explained.
+  const uint32_t t_q0 = nowMs();
   if (!call("GET", url, "", &resp, out, now_ms)) {
     library_->publishTracks(false);
     return;
   }
+  NETLOG("QSIZE plain           %6u bytes in %5ums", (unsigned)resp.body.size(),
+         (unsigned)(nowMs() - t_q0));
   if (resp.status != 200) {
     NETLOG("queue -> %d", resp.status);
     library_->setTracksError(resp.status);
@@ -545,6 +562,71 @@ void SpotifySource::fetchQueue(AppState *out, uint32_t now_ms) {
   }
   library_->publishTracks(false);
   NETLOG("queue: %d entries", n);
+}
+
+// Jump to an entry in UP NEXT.
+//
+// Spotify has no "play queue index N" call, so this is built out of the two
+// things the API does offer, in the order that gives the better result:
+//
+//  1. Play the track WITHIN the context that is already playing. One request,
+//     it lands exactly on the track, and the rest of the playlist keeps going
+//     after it. Only possible when there is a context and the track belongs to
+//     it - so it is attempted, not assumed.
+//  2. Otherwise skip forward once per row. Slower and visible, but it cannot be
+//     wrong: the queue IS what /next walks through, including anything the user
+//     queued by hand, which is precisely the case tier 1 cannot serve.
+//
+// Playing the bare track uri was the third option and is deliberately not here.
+// It works every time and destroys the queue every time - everything below the
+// track you picked is gone and Spotify drops into autoplay radio when it ends.
+// A jump that silently discards the rest of your queue is not a jump.
+void SpotifySource::playQueueItem(const Command &c, AppState *out,
+                                  uint32_t now_ms) {
+  if (c.uri[0] == '\0') return;
+
+  bool done = false;
+  if (!context_uri_.empty()) {
+    char body[256];
+    std::snprintf(body, sizeof(body),
+                  "{\"context_uri\":\"%s\",\"offset\":{\"uri\":\"%s\"}}",
+                  context_uri_.c_str(), c.uri);
+    HttpResponse resp;
+    if (call("PUT", std::string(API) + "/me/player/play", body, &resp, out,
+             now_ms)) {
+      done = resp.status >= 200 && resp.status < 300;
+      // Not an error worth a toast: a hand-queued track is simply not in the
+      // context, and the fallback below is the right answer rather than a
+      // consolation prize.
+      if (!done) NETLOG("jump: context offset -> %d, skipping instead", resp.status);
+    }
+  }
+
+  if (!done) {
+    // One request per row. Bounded by the list itself, which is capped at
+    // MAX_TRACKS, so this cannot become an unbounded burst against the rate
+    // limit however the UI is driven.
+    int skips = c.arg;
+    if (skips < 0) skips = 0;
+    if (skips > spotify::Library::MAX_TRACKS) skips = spotify::Library::MAX_TRACKS;
+    NETLOG("jump: skipping forward %d", skips);
+    for (int i = 0; i < skips; ++i) {
+      HttpResponse resp;
+      if (!call("POST", std::string(API) + "/me/player/next", "", &resp, out,
+                now_ms))
+        break;
+      if (resp.status < 200 || resp.status >= 300) {
+        NETLOG("jump: next -> %d, stopping", resp.status);
+        break;
+      }
+    }
+  }
+
+  // Re-read both sides, because the screen must show what happened rather than
+  // what was asked for. The player poll is nudged rather than called directly
+  // so the existing settle logic still owns when the new track is believed.
+  fetchQueue(out, now_ms);
+  nudge();
 }
 
 void SpotifySource::refreshLiked(AppState *out, uint32_t now_ms) {

@@ -21,6 +21,11 @@ enum class CommandType : uint8_t {
   FetchTracks,      // uri = playlist uri, text = its name
   FetchQueue,       // what is playing and what is coming up
   PlayFromContext,  // uri = playlist uri, arg = track offset within it
+  // Jump to an entry in UP NEXT. uri = the track, arg = how many rows below
+  // the one playing it sits. Spotify has no play-queue-index call, so the net
+  // task needs both: the uri for the one-shot context jump, and the row count
+  // for the skip-forward fallback when that is refused.
+  PlayQueueItem,
 };
 
 struct Command {

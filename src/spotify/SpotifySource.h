@@ -67,6 +67,7 @@ class SpotifySource {
   void fetchTracks(const char *playlist_id, const char *playlist_uri,
                    const char *playlist_name, AppState *out, uint32_t now_ms);
   void fetchQueue(AppState *out, uint32_t now_ms);
+  void playQueueItem(const Command &c, AppState *out, uint32_t now_ms);
   void probeLibraryWrite(AppState *out, uint32_t now_ms);
 
   SpotifyAuth auth_;
@@ -96,6 +97,13 @@ class SpotifySource {
   // Cleared permanently once /me/tracks/contains answers 403: the restriction
   // is per-app, so retrying every poll would just burn rate limit forever.
   bool liked_supported_ = true;
+
+  // What the active player is playing FROM - a playlist, album or artist uri,
+  // empty when Spotify reports none (a bare track, or autoplay radio). Read from
+  // every poll and used only by the queue jump, which needs a context to aim an
+  // offset into. Net-task-local on purpose: nothing else wants it, so it does
+  // not belong in the shared AppState.
+  std::string context_uri_;
 
   bool idle_poll_ = false;
   spotify::Library *library_ = nullptr;

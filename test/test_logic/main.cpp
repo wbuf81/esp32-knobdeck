@@ -32,6 +32,7 @@
 #include "gfx/Quad3D.h"
 #include "gfx/fonts/Fonts.h"
 #include "input/Gesture.h"
+#include "shell/ConfirmRing.h"
 #include "shell/ListView.h"
 #include "shell/RadialShell.h"
 #include "spotify/Library.h"
@@ -1836,6 +1837,164 @@ void test_listview_drawn_in_bands_matches_full_frame(void) {
 
 
 // ---------------------------------------------------------------------------
+// ConfirmRing
+//
+// The jump confirmation. Every test here is written against something you could
+// see go wrong on the dial: the name not shown, the marker not moving, text
+// spilling off the round window, or the banded path disagreeing with the whole
+// frame.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Lit pixels strictly left and right of the vertical centreline. The whole
+// point of the control is that the choice reads as a SIDE, so that is what the
+// tests measure.
+void litPerSide(const gfx::Framebuffer &fb, int *left, int *right) {
+  *left = 0;
+  *right = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x) {
+      if (fb.at(x, y) == 0) continue;
+      if (x < gfx::CX) ++*left;
+      else if (x > gfx::CX) ++*right;
+    }
+}
+
+}  // namespace
+
+void test_confirmring_names_the_track(void) {
+  // Asking "are you sure?" without saying what you are sure ABOUT is the one
+  // thing this screen must never do.
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  shell::ConfirmRing cr;
+  cr.prepare("The Valley Comes Alive", 1.0f);
+  gfx::Surface s = fullSurface(fb);
+  cr.render(s, 0x07FF);
+  TEST_ASSERT_TRUE(litIn(fb, 0, gfx::H) > 200);
+
+  // A different track must not draw the same screen.
+  gfx::Framebuffer other;
+  other.fill(0x0000);
+  shell::ConfirmRing c2;
+  c2.prepare("Stubborn Love", 1.0f);
+  gfx::Surface s2 = fullSurface(other);
+  c2.render(s2, 0x07FF);
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (fb.at(x, y) != other.at(x, y)) ++diffs;
+  TEST_ASSERT_TRUE(diffs > 50);
+}
+
+void test_confirmring_marker_leans_to_the_chosen_side(void) {
+  // Choice is the entire state of this screen. If the two ends render the same,
+  // the knob is doing nothing the user can see.
+  gfx::Framebuffer no, yes;
+  no.fill(0x0000);
+  yes.fill(0x0000);
+  shell::ConfirmRing cn, cy;
+  gfx::Surface sn = fullSurface(no);
+  gfx::Surface sy = fullSurface(yes);
+  cn.prepare("Ho Hey", 0.0f);
+  cn.render(sn, 0x07FF);
+  cy.prepare("Ho Hey", 1.0f);
+  cy.render(sy, 0x07FF);
+
+  int nl = 0, nr = 0, yl = 0, yr = 0;
+  litPerSide(no, &nl, &nr);
+  litPerSide(yes, &yl, &yr);
+  // Cancel brightens the left, confirm brightens the right. Measured as a shift
+  // rather than an absolute, because both arcs are always drawn.
+  TEST_ASSERT_TRUE(nl > yl);
+  TEST_ASSERT_TRUE(yr > nr);
+}
+
+void test_confirmring_mid_glide_differs_from_both_ends(void) {
+  // The marker is eased, same as the list. A frame halfway through the swing
+  // must be its own picture, not a snap to one end.
+  gfx::Framebuffer a, b;
+  a.fill(0x0000);
+  b.fill(0x0000);
+  shell::ConfirmRing ca, cb;
+  gfx::Surface sa = fullSurface(a);
+  gfx::Surface sb = fullSurface(b);
+  ca.prepare("Ho Hey", 0.0f);
+  ca.render(sa, 0x07FF);
+  cb.prepare("Ho Hey", 0.5f);
+  cb.render(sb, 0x07FF);
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (a.at(x, y) != b.at(x, y)) ++diffs;
+  TEST_ASSERT_TRUE(diffs > 20);
+}
+
+void test_confirmring_long_name_stays_inside_the_disc(void) {
+  // The round window is the constraint the rectangular framebuffer hides. A
+  // name long enough to wrap must still be clipped by the chord, not by luck.
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  shell::ConfirmRing cr;
+  cr.prepare(
+      "An Extremely Long Track Name That Will Certainly Need More Than One "
+      "Line To Sit On This Dial",
+      1.0f);
+  gfx::Surface s = fullSurface(fb);
+  cr.render(s, 0x07FF);
+  int outside = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x) {
+      const int dx = x - gfx::CX, dy = y - gfx::CY;
+      if (dx * dx + dy * dy > gfx::RADIUS_SQ && fb.at(x, y) != 0) ++outside;
+    }
+  TEST_ASSERT_EQUAL_INT(0, outside);
+}
+
+void test_confirmring_handles_a_missing_name(void) {
+  // The queue can hand back an entry with no name. Asking about nothing is
+  // better than dereferencing nothing.
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  shell::ConfirmRing cr;
+  gfx::Surface s = fullSurface(fb);
+  cr.prepare(nullptr, 0.0f);
+  cr.render(s, 0x07FF);
+  cr.prepare("", 1.0f);
+  cr.render(s, 0x07FF);
+  TEST_ASSERT_TRUE(true);  // reaching here without a crash is the assertion
+}
+
+void test_confirmring_drawn_in_bands_matches_full_frame(void) {
+  // KNOB_BANDS=1 must be byte-identical to the whole frame. This assertion has
+  // caught three clipping bugs in this project already.
+  gfx::Framebuffer whole, banded;
+  whole.fill(0x0000);
+  banded.fill(0x0000);
+  shell::ConfirmRing c1, c2;
+  c1.prepare("The Valley Comes Alive", 0.37f);
+  c2.prepare("The Valley Comes Alive", 0.37f);
+
+  gfx::Surface s = fullSurface(whole);
+  c1.render(s, 0x07FF);
+  for (int y = 0; y < gfx::H; y += 20) {
+    gfx::Surface b;
+    b.px = banded.pixels() + static_cast<size_t>(y) * gfx::W;
+    b.w = gfx::W;
+    b.h = 20;
+    b.y0 = y;
+    c2.render(b, 0x07FF);
+  }
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (whole.at(x, y) != banded.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+
+// ---------------------------------------------------------------------------
 // Backlight
 // ---------------------------------------------------------------------------
 
@@ -2122,6 +2281,12 @@ int main(int, char **) {
   RUN_TEST(test_listview_empty_says_so);
   RUN_TEST(test_listview_handles_null_items_and_short_lists);
   RUN_TEST(test_listview_drawn_in_bands_matches_full_frame);
+  RUN_TEST(test_confirmring_names_the_track);
+  RUN_TEST(test_confirmring_marker_leans_to_the_chosen_side);
+  RUN_TEST(test_confirmring_mid_glide_differs_from_both_ends);
+  RUN_TEST(test_confirmring_long_name_stays_inside_the_disc);
+  RUN_TEST(test_confirmring_handles_a_missing_name);
+  RUN_TEST(test_confirmring_drawn_in_bands_matches_full_frame);
   RUN_TEST(test_backlight_stays_bright_while_playing);
   RUN_TEST(test_backlight_dims_then_sleeps_when_idle_and_stopped);
   RUN_TEST(test_backlight_input_wakes_it_and_reports_the_wake);
