@@ -25,6 +25,7 @@ enum class ThemeId : uint8_t {
   Heartbeat,
   Rain,
   Tetris,
+  Outrun,
   Count,
 };
 
@@ -65,5 +66,10 @@ float themeDubDelay(ThemeId id);
 // How hard the album itself contracts on a beat, as a fraction of its size.
 // 0 leaves the existing gentle bass follow alone.
 float themeCoverPulse(ThemeId id);
+
+// True when the theme paints its own backdrop and the radial gradient must be
+// skipped entirely. Skipped, not drawn over: the two together would be the
+// read-and-write-every-pixel pass this renderer refuses to have.
+bool themeOwnsBackdrop(ThemeId id);
 
 }  // namespace fx

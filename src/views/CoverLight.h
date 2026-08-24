@@ -18,6 +18,7 @@
 #include "core/Rng.h"
 #include "art/Image.h"
 #include "fx/Particles.h"
+#include "fx/Outrun.h"
 #include "fx/Tetris.h"
 #include "fx/Themes.h"
 #include "gfx/BloomBand.h"
@@ -139,6 +140,7 @@ class CoverLight {
   // ~200 bytes, so it is simply always here rather than being conjured on a
   // theme change - which would mean allocating on a fragmenting heap mid-track.
   fx::Tetris tetris_;
+  fx::Outrun outrun_;
   gfx::BloomBand bloom_;
 
   // The radial gradient, packed RGB565.

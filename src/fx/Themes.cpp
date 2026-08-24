@@ -10,6 +10,7 @@ const char *themeName(ThemeId id) {
     case ThemeId::Heartbeat: return "Heartbeat";
     case ThemeId::Rain: return "Rain";
     case ThemeId::Tetris: return "Tetris";
+    case ThemeId::Outrun: return "Outrun";
     case ThemeId::Count: break;
   }
   return "?";
@@ -88,6 +89,21 @@ void themeSpawn(ThemeId id, const uint16_t palette[16], SpawnParams *out) {
       p.gravity_y = 6.0f;
       break;
 
+    case ThemeId::Outrun:
+      // Sparse embers drifting UP, against the grid's downward rush. Motion in
+      // the opposite direction is what gives the road its speed; particles
+      // falling with it would just look like more grid.
+      p.spread = 150.0f;
+      p.speed_min = 14.0f;
+      p.speed_max = 60.0f;
+      p.life_min = 1.6f;
+      p.life_max = 3.4f;
+      p.size_min = 1.0f;
+      p.size_max = 2.0f;
+      p.drag = 0.80f;
+      p.gravity_y = -34.0f;
+      break;
+
     case ThemeId::Count:
       break;
   }
@@ -116,6 +132,9 @@ int themeEmit(ThemeId id, const audio::Modulation &m, float dt, bool ambient,
       break;
     case ThemeId::Tetris:
       rate = 14.0f + 18.0f * m.loudness;
+      break;
+    case ThemeId::Outrun:
+      rate = 22.0f + 30.0f * m.loudness;
       break;
     case ThemeId::Count:
       break;
@@ -146,6 +165,9 @@ int themeBurst(ThemeId id, const audio::Modulation &m, bool ambient) {
       // event said twice.
       n = 0.0f;
       break;
+    case ThemeId::Outrun:
+      n = 30.0f + 50.0f * m.bass;
+      break;
     case ThemeId::Count:
       break;
   }
@@ -153,6 +175,8 @@ int themeBurst(ThemeId id, const audio::Modulation &m, bool ambient) {
 }
 
 bool themeDoublePulse(ThemeId id) { return id == ThemeId::Heartbeat; }
+
+bool themeOwnsBackdrop(ThemeId id) { return id == ThemeId::Outrun; }
 
 float themeDubDelay(ThemeId id) {
   return id == ThemeId::Heartbeat ? 0.17f : 0.0f;
@@ -176,6 +200,9 @@ float themeRingScale(ThemeId id) {
     // No shockwave at all: a ring expanding through a grid of falling blocks
     // reads as a rendering fault rather than as a pulse.
     case ThemeId::Tetris: return 0.0f;
+    // No ring: the backdrop is opaque and painted last-to-first per row, so a
+    // shockwave baked into the radial table would simply not be visible.
+    case ThemeId::Outrun: return 0.0f;
     case ThemeId::Count: break;
   }
   return 1.0f;

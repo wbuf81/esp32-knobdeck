@@ -30,6 +30,7 @@
 #include "audio/Procedural.h"
 #include "fx/Particles.h"
 #include "fx/ThemePicker.h"
+#include "fx/Outrun.h"
 #include "fx/Tetris.h"
 #include "fx/Themes.h"
 #include "gfx/Quad3D.h"
@@ -2784,6 +2785,116 @@ void test_heartbeat_and_coverlight_render_differently(void) {
 
 
 // ---------------------------------------------------------------------------
+// Outrun
+// ---------------------------------------------------------------------------
+
+void test_outrun_owns_every_pixel(void) {
+  // It REPLACES the radial backdrop rather than drawing over it, which is the
+  // only way it fits the budget. A single pixel it fails to write would show
+  // stale band contents, not black.
+  gfx::Framebuffer fb;
+  fb.fill(0x07E0);  // green: unmissable if any survives
+  fx::Outrun o;
+  o.begin();
+  audio::Modulation m;
+  o.update(m, 1.0f / 30.0f);
+  gfx::Surface s = fullSurface(fb);
+  o.drawBand(s, 0xFFFF);
+  int leftover = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (fb.at(x, y) == 0x07E0) ++leftover;
+  TEST_ASSERT_EQUAL_INT(0, leftover);
+}
+
+void test_outrun_drawn_in_bands_matches_full_frame(void) {
+  gfx::Framebuffer whole, banded;
+  whole.fill(0x0000);
+  banded.fill(0x0000);
+  fx::Outrun a, b;
+  a.begin();
+  b.begin();
+  audio::Modulation m;
+  m.loudness = 0.6f;
+  for (int f = 0; f < 17; ++f) {
+    a.update(m, 1.0f / 30.0f);
+    b.update(m, 1.0f / 30.0f);
+  }
+  gfx::Surface s = fullSurface(whole);
+  a.drawBand(s, 0xFFFF);
+  for (int y = 0; y < gfx::H; y += 20) {
+    gfx::Surface bs;
+    bs.px = banded.pixels() + static_cast<size_t>(y) * gfx::W;
+    bs.w = gfx::W;
+    bs.h = 20;
+    bs.y0 = y;
+    b.drawBand(bs, 0xFFFF);
+  }
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (whole.at(x, y) != banded.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+void test_outrun_grid_moves_toward_the_viewer(void) {
+  // The road has to travel. A frozen grid is a wallpaper.
+  auto hashAt = [](int frames) {
+    fx::Outrun o;
+    o.begin();
+    audio::Modulation m;
+    m.loudness = 0.5f;
+    for (int f = 0; f < frames; ++f) o.update(m, 1.0f / 30.0f);
+    gfx::Framebuffer fb;
+    fb.fill(0x0000);
+    gfx::Surface s = fullSurface(fb);
+    o.drawBand(s, 0xFFFF);
+    uint32_t h = 2166136261u;
+    for (int y = 0; y < gfx::H; ++y)
+      for (int x = 0; x < gfx::W; ++x) h = (h ^ fb.at(x, y)) * 16777619u;
+    return h;
+  };
+  TEST_ASSERT_TRUE(hashAt(2) != hashAt(9));
+}
+
+void test_outrun_phase_never_runs_away(void) {
+  // Kept in 0..1 by subtraction rather than fmod, so a track playing for hours
+  // cannot drift into a range where a float has lost the precision to place a
+  // line on the right row.
+  fx::Outrun o;
+  o.begin();
+  audio::Modulation m;
+  m.loudness = 1.0f;
+  // An hour at 30fps.
+  for (int f = 0; f < 30 * 3600; ++f) o.update(m, 1.0f / 30.0f);
+  gfx::Framebuffer a, b;
+  a.fill(0x0000);
+  b.fill(0x0000);
+  gfx::Surface sa = fullSurface(a);
+  o.drawBand(sa, 0xFFFF);
+  fx::Outrun fresh;
+  fresh.begin();
+  fresh.update(m, 1.0f / 30.0f);
+  gfx::Surface sb = fullSurface(b);
+  fresh.drawBand(sb, 0xFFFF);
+  // Not equal frames - just proof the old one still draws a real scene rather
+  // than a degenerate one.
+  int lit = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (a.at(x, y) != 0) ++lit;
+  TEST_ASSERT_TRUE(lit > gfx::W * gfx::H / 2);
+}
+
+void test_outrun_is_the_only_theme_that_owns_the_backdrop(void) {
+  // The gate that keeps the two full-screen passes from ever both running.
+  TEST_ASSERT_TRUE(fx::themeOwnsBackdrop(fx::ThemeId::Outrun));
+  TEST_ASSERT_FALSE(fx::themeOwnsBackdrop(fx::ThemeId::CoverLight));
+  TEST_ASSERT_FALSE(fx::themeOwnsBackdrop(fx::ThemeId::Tetris));
+}
+
+
+// ---------------------------------------------------------------------------
 // Backlight
 // ---------------------------------------------------------------------------
 
@@ -3112,6 +3223,11 @@ int main(int, char **) {
   RUN_TEST(test_heartbeat_contracts_the_cover_and_coverlight_does_not);
   RUN_TEST(test_heartbeat_fires_a_second_ring_after_the_first);
   RUN_TEST(test_heartbeat_and_coverlight_render_differently);
+  RUN_TEST(test_outrun_owns_every_pixel);
+  RUN_TEST(test_outrun_drawn_in_bands_matches_full_frame);
+  RUN_TEST(test_outrun_grid_moves_toward_the_viewer);
+  RUN_TEST(test_outrun_phase_never_runs_away);
+  RUN_TEST(test_outrun_is_the_only_theme_that_owns_the_backdrop);
   RUN_TEST(test_backlight_stays_bright_while_playing);
   RUN_TEST(test_backlight_dims_then_sleeps_when_idle_and_stopped);
   RUN_TEST(test_backlight_input_wakes_it_and_reports_the_wake);
