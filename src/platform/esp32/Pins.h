@@ -13,6 +13,15 @@
 
 namespace pins {
 
+// Mount the board upside down, so the USB-C port is at the top.
+//
+// Done in the panel's MADCTL register, so the hardware does the flip and it
+// costs nothing - transforming coordinates in the renderer would mean touching
+// every pixel. The touch controller has to be flipped to match in software,
+// though: rotating the display without rotating the input puts every tap in the
+// mirror-image place and swaps up-swipes for down-swipes.
+constexpr bool ROTATE_180 = true;
+
 // Display: ST77916, QSPI.
 constexpr int LCD_SCK = 13;   // confirmed
 constexpr int LCD_CS = 14;

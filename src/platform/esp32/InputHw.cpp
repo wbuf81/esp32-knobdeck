@@ -5,6 +5,7 @@
 #include <driver/pcnt.h>
 
 #include "Pins.h"
+#include "gfx/Geometry.h"
 
 namespace esp32 {
 namespace {
@@ -199,8 +200,18 @@ bool touchRead(int *x, int *y) {
   // carry flags in their top nibble, hence the masks.
   if (!readReg(CST816_ADDR, 0x02, b, 6)) return false;
   if (b[0] == 0) return false;
-  if (x) *x = ((b[1] & 0x0F) << 8) | b[2];
-  if (y) *y = ((b[3] & 0x0F) << 8) | b[4];
+  int rx = ((b[1] & 0x0F) << 8) | b[2];
+  int ry = ((b[3] & 0x0F) << 8) | b[4];
+
+  // Flip to match the panel. The display's rotation happens in MADCTL, which
+  // the touch controller knows nothing about, so without this every tap lands
+  // at its mirror image and a swipe up reads as a swipe down.
+  if (pins::ROTATE_180) {
+    rx = gfx::W - 1 - rx;
+    ry = gfx::H - 1 - ry;
+  }
+  if (x) *x = rx;
+  if (y) *y = ry;
   return true;
 }
 

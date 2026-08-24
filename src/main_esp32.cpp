@@ -27,6 +27,7 @@
 #include "config/DeviceConfig.h"
 #include "core/AppState.h"
 #include "core/FrameClock.h"
+#include "core/Backlight.h"
 #include "core/Hash.h"
 #include "core/Log.h"
 #include "core/ProgressClock.h"
@@ -96,6 +97,11 @@ int g_volume = -1;
 // walking away leaves the device showing what is playing.
 constexpr uint32_t IDLE_RETURN_MS = 15000;
 uint32_t g_last_input_ms = 0;
+core::Backlight g_backlight;
+
+// Set by the host companion when the Mac sleeps or locks. Always false until
+// that exists; wired now so the backlight rule has one place to read it.
+bool g_host_asleep = false;
 
 // Cumulative knob totals, reported in the periodic status line.
 //
@@ -247,11 +253,16 @@ void loop() {
 
   // --- input ---
   //
+  // Whether the screen was off BEFORE this frame's input, so the input that
+  // wakes it can be swallowed the way a phone does - otherwise the tap that
+  // wakes the device also pauses the music.
+  const bool was_off = g_backlight.state() == core::ScreenState::Off;
+  //
   // No pin-level polling here. The burst that proved the encoder pins move -
   // 600 samples at 40us - cost 24 ms of every frame, and PCNT counts in
   // hardware.
   const int detents = esp32::encoderDelta();
-  if (detents != 0) {
+  if (detents != 0 && !was_off) {
     esp32::hapticsClick();
     if (g_screen == Screen::Player) {
       if (g_volume < 0) g_volume = st.pb.volume_pct >= 0 ? st.pb.volume_pct : 50;
@@ -287,6 +298,9 @@ void loop() {
   const input::Gesture g = g_gesture.update(touching, tx, ty, now);
   if (g != input::Gesture::None || detents != 0) g_last_input_ms = now;
 
+  g_backlight.update(now, st.pb.is_playing, g_last_input_ms, g_host_asleep);
+  esp32::panelBacklight(g_backlight.duty());
+
   // Drift back to the player after a spell of nothing.
   //
   // Being stranded in a list is the one state this device cannot explain: there
@@ -298,7 +312,10 @@ void loop() {
     g_sel_pos = 0.0f;
   }
 
-  if (g != input::Gesture::None) {
+  if (was_off && (g != input::Gesture::None || detents != 0)) {
+    // Woken, and that is all this input does.
+    LOGF("woke (input swallowed)");
+  } else if (g != input::Gesture::None) {
     LOGF("touch: %s at (%d,%d)", input::gestureName(g), tx, ty);
     Command c;
     bool send = false;
@@ -487,7 +504,11 @@ void loop() {
                    note, current);
   }
 
-  if (g_panel_ok) {
+  // Nothing is drawn while the backlight is off. Compositing frames nobody can
+  // see is pure heat, and it is most of the CPU this device uses.
+  if (g_backlight.state() == core::ScreenState::Off) {
+    delay(40);
+  } else if (g_panel_ok) {
     esp32::panelBeginFrame();
     for (int y = 0; y < gfx::H; y += esp32::PANEL_BAND_H) {
       gfx::Surface s;

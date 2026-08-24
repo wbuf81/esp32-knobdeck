@@ -395,7 +395,18 @@ bool panelBegin() {
     i += 3 + n;
     ++count;
   }
-  Serial.printf("panel: init sequence sent, %d commands\n", count);
+  // MADCTL last, overriding whatever the vendor table set.
+  //
+  // MY (0x80) flips row order and MX (0x40) flips column order, so both together
+  // are a 180-degree rotation. Bit 0x08 is BGR and stays clear: this panel is
+  // RGB, confirmed by a test pattern whose quadrants came out in the right
+  // colours. The panel's RAM is exactly 360x360, so a flip needs no address
+  // window offset - on a panel with more RAM than visible area it would.
+  const uint8_t madctl = pins::ROTATE_180 ? 0xC0 : 0x00;
+  cmd(0x36, &madctl, 1);
+
+  Serial.printf("panel: init sequence sent, %d commands, madctl 0x%02X%s\n",
+                count, madctl, pins::ROTATE_180 ? " (rotated 180)" : "");
   return true;
 }
 

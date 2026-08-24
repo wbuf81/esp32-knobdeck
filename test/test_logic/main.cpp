@@ -13,6 +13,7 @@
 #include <cstdlib>
 
 #include "core/FrameClock.h"
+#include "core/Backlight.h"
 #include "core/Hash.h"
 #include "core/Rng.h"
 #include "gfx/Blend.h"
@@ -1832,6 +1833,83 @@ void test_listview_drawn_in_bands_matches_full_frame(void) {
   TEST_ASSERT_EQUAL_INT(0, diffs);
 }
 
+
+// ---------------------------------------------------------------------------
+// Backlight
+// ---------------------------------------------------------------------------
+
+void test_backlight_stays_bright_while_playing(void) {
+  // The rule that matters. This is a now-playing display; dimming the thing it
+  // exists to show would be a bug dressed up as a power saving.
+  core::Backlight bl;
+  uint32_t t = 0;
+  for (int i = 0; i < 2000; ++i) {
+    t += 500;  // sixteen minutes with no input at all
+    bl.update(t, /*playing=*/true, /*last_input_ms=*/0, /*host_asleep=*/false);
+  }
+  TEST_ASSERT_EQUAL(core::ScreenState::Bright, bl.state());
+  TEST_ASSERT_EQUAL_UINT8(core::Backlight::BRIGHT, bl.duty());
+}
+
+void test_backlight_dims_then_sleeps_when_idle_and_stopped(void) {
+  core::Backlight bl;
+  const uint32_t input_at = 1000;
+  bl.update(input_at, false, input_at, false);
+  TEST_ASSERT_EQUAL(core::ScreenState::Bright, bl.state());
+
+  bl.update(input_at + core::Backlight::DIM_AFTER_MS - 1, false, input_at, false);
+  TEST_ASSERT_EQUAL(core::ScreenState::Bright, bl.state());
+
+  bl.update(input_at + core::Backlight::DIM_AFTER_MS, false, input_at, false);
+  TEST_ASSERT_EQUAL(core::ScreenState::Dim, bl.state());
+
+  bl.update(input_at + core::Backlight::OFF_AFTER_MS, false, input_at, false);
+  TEST_ASSERT_EQUAL(core::ScreenState::Off, bl.state());
+  TEST_ASSERT_EQUAL_UINT8(core::Backlight::OFF, bl.duty());
+}
+
+void test_backlight_input_wakes_it_and_reports_the_wake(void) {
+  core::Backlight bl;
+  bl.update(1000, false, 1000, false);
+  const uint32_t late = 1000 + core::Backlight::OFF_AFTER_MS + 5000;
+  bl.update(late, false, 1000, false);
+  TEST_ASSERT_EQUAL(core::ScreenState::Off, bl.state());
+
+  // An input at `late` wakes it.
+  bl.update(late + 10, false, late, false);
+  TEST_ASSERT_EQUAL(core::ScreenState::Bright, bl.state());
+  // The caller swallows the input that caused this, the way a phone does -
+  // otherwise the tap that wakes the device also pauses the music.
+  TEST_ASSERT_TRUE(bl.justWoke());
+
+  bl.update(late + 20, false, late, false);
+  TEST_ASSERT_FALSE(bl.justWoke());  // only on the frame it woke
+}
+
+void test_backlight_host_asleep_overrides_playback(void) {
+  // If the machine it sits beside is asleep or locked, so is this - even mid
+  // track, and without waiting out any idle timer.
+  core::Backlight bl;
+  bl.update(1000, /*playing=*/true, /*last_input_ms=*/1000, /*host_asleep=*/true);
+  TEST_ASSERT_EQUAL(core::ScreenState::Off, bl.state());
+
+  // And it comes straight back when the host does.
+  bl.update(1100, true, 1000, false);
+  TEST_ASSERT_EQUAL(core::ScreenState::Bright, bl.state());
+}
+
+void test_backlight_survives_the_millis_wrap(void) {
+  // A device left plugged in reaches the 49.7-day wrap on a timer, not by
+  // chance. Unsigned subtraction has to carry the idle interval across it.
+  core::Backlight bl;
+  const uint32_t before_wrap = 0xFFFFF000u;
+  bl.update(before_wrap, false, before_wrap, false);
+  // Now well past the wrap, with the last input still on the far side of it.
+  bl.update(before_wrap + core::Backlight::DIM_AFTER_MS + 1000, false,
+            before_wrap, false);
+  TEST_ASSERT_EQUAL(core::ScreenState::Dim, bl.state());
+}
+
 int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_framebuffer_is_360_square);
@@ -1938,5 +2016,10 @@ int main(int, char **) {
   RUN_TEST(test_listview_empty_says_so);
   RUN_TEST(test_listview_handles_null_items_and_short_lists);
   RUN_TEST(test_listview_drawn_in_bands_matches_full_frame);
+  RUN_TEST(test_backlight_stays_bright_while_playing);
+  RUN_TEST(test_backlight_dims_then_sleeps_when_idle_and_stopped);
+  RUN_TEST(test_backlight_input_wakes_it_and_reports_the_wake);
+  RUN_TEST(test_backlight_host_asleep_overrides_playback);
+  RUN_TEST(test_backlight_survives_the_millis_wrap);
   return UNITY_END();
 }
