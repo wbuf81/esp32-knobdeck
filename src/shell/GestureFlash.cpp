@@ -4,6 +4,10 @@
 
 namespace shell {
 
+bool transportFeedbackVisible(bool has_track, bool has_device) {
+  return has_track || has_device;
+}
+
 void GestureFlash::show(Glyph g, uint32_t now_ms) {
   what_ = g;
   shown_ms_ = now_ms;

@@ -260,6 +260,11 @@ void SpotifySource::pollPlayer(AppState *out, uint32_t now_ms) {
     NETLOG("state: /me/player 204 — no active session");
     out->pb.has_track = false;
     out->pb.is_playing = false;
+    // And nothing is listening. This is the one place that learns it WITHOUT
+    // first firing a command and reading the 404 off the failure - which is why
+    // the transport furniture used to reappear after every reboot and cost one
+    // doomed request to clear again.
+    out->pb.has_device = false;
     polled_ = true;
     next_poll_.arm(now_ms, idle_poll_ ? POLL_ASLEEP_MS : POLL_PAUSED_MS);
     return;

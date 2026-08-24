@@ -19,6 +19,20 @@
 
 namespace shell {
 
+// Whether a transport gesture should draw its glyph at all.
+//
+// The flash answers a gesture, but only a gesture that could have DONE
+// something deserves an answer shaped like a transport control. With no track
+// and no device there is nothing to play, pause or skip, and a play glyph there
+// is the device claiming a capability it does not have - the same class of lie
+// as drawing volume_pct == -1 as zero.
+//
+// `has_device` rather than `has_track` alone is the load-bearing part. Spotify
+// open and active but with nothing loaded answers /me/player with a null item:
+// has_track goes false while has_device stays true, and a play command in that
+// state genuinely can resume. Gating on the track alone would throw that away.
+bool transportFeedbackVisible(bool has_track, bool has_device);
+
 class GestureFlash {
  public:
   // Long enough to read at a glance, short enough not to sit on the artwork.

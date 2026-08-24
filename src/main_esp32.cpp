@@ -301,17 +301,36 @@ void loop() {
   // 600 samples at 40us - cost 24 ms of every frame, and PCNT counts in
   // hardware.
   const int detents = esp32::encoderDelta();
+  //
+  // Whether the sleeping dog is what is on screen right now. Computed here as
+  // well as at render time because it decides whether input gets a REACTION on
+  // top of whatever it already does - and the render-time copy is 300 lines
+  // further down, after the commands have already been queued.
+  const bool dog_on_screen = !st.pb.has_track && g_screen == Screen::Player;
+  //
+  // Whether a gesture gets an answer shaped like a transport control. When it
+  // does not, the gesture is Daisy's alone: no glyph, no command, no optimistic
+  // flip. She IS the answer, and on this screen she is the only one there is -
+  // showToast writes a field no renderer reads.
+  const bool transport = shell::transportFeedbackVisible(st.pb.has_track,
+                                                         st.pb.has_device);
+
   if (detents != 0 && !was_off) {
     esp32::hapticsClick();
+    // A turn while she is asleep gets a sniff. Purely additive - the volume
+    // edit below still happens, because the knob is still the volume knob.
+    if (dog_on_screen) g_dog.react(views::DaisyIdle::Reaction::Turn);
     if (g_screen == Screen::Player) {
       if (g_volume < 0) g_volume = st.pb.volume_pct >= 0 ? st.pb.volume_pct : 50;
       g_volume += detents * 2;
       if (g_volume < 0) g_volume = 0;
       if (g_volume > 100) g_volume = 100;
       g_shell.showVolume(g_volume, now);
-      if (g_net) {
+      if (g_net && transport) {
         // Coalesced: a fast spin sends the final value once rather than forty
-        // times, which keeps both the rate limit and the knob happy.
+        // times, which keeps both the rate limit and the knob happy. Skipped
+        // outright with nothing listening - the ring is already hidden behind
+        // the dog, so the request could only ever have produced a 404.
         Command c;
         c.type = CommandType::SetVolume;
         c.arg = g_volume;
@@ -390,6 +409,14 @@ void loop() {
             //
             // The settle window is what stops a poll already in flight from
             // snapping the state back before Spotify has caught up.
+            // She lifts her head. With nothing listening this is the whole
+            // response: no glyph promising a transport that is not there, and
+            // no request that could only come back 404.
+            if (dog_on_screen) g_dog.react(views::DaisyIdle::Reaction::Touch);
+            if (!transport) {
+              esp32::hapticsClick();
+              break;
+            }
             if (g_net) {
               g_net->mutate([](AppState &a) {
                 a.pb.is_playing = !a.pb.is_playing;
@@ -406,15 +433,21 @@ void loop() {
             esp32::hapticsClick();
             break;
           case input::Gesture::SwipeLeft:
-            c.type = CommandType::Previous;
-            send = true;
-            g_flash.show(shell::Glyph::Previous, now);
+            if (dog_on_screen) g_dog.react(views::DaisyIdle::Reaction::Swipe);
+            if (transport) {
+              c.type = CommandType::Previous;
+              send = true;
+              g_flash.show(shell::Glyph::Previous, now);
+            }
             esp32::hapticsBump();
             break;
           case input::Gesture::SwipeRight:
-            c.type = CommandType::Next;
-            send = true;
-            g_flash.show(shell::Glyph::Next, now);
+            if (dog_on_screen) g_dog.react(views::DaisyIdle::Reaction::Swipe);
+            if (transport) {
+              c.type = CommandType::Next;
+              send = true;
+              g_flash.show(shell::Glyph::Next, now);
+            }
             esp32::hapticsBump();
             break;
           case input::Gesture::LongPress:
@@ -425,7 +458,13 @@ void loop() {
             // therefore looked exactly like a device that had stopped listening.
             // A refusal the user cannot see is the same as a bug.
             if (!st.pb.has_track) {
-              g_flash.show(shell::Glyph::HeartSlash, now);
+              // The refusal is still owed - a refusal the user cannot see is
+              // the same as a bug, which is why this branch exists at all. But
+              // a crossed-out heart only refuses something SPECIFIC. With
+              // nothing listening there is no track to have refused, so the
+              // zoomies are the honest answer and the glyph would be noise.
+              if (dog_on_screen) g_dog.react(views::DaisyIdle::Reaction::Hold);
+              if (transport) g_flash.show(shell::Glyph::HeartSlash, now);
               if (g_net)
                 g_net->mutate([now](AppState &a) {
                   a.showToast("Nothing playing", now);
@@ -450,6 +489,21 @@ void loop() {
             esp32::hapticsBump();
             break;
           case input::Gesture::SwipeDown:
+            // The queue is what is coming up AFTER something. With no current
+            // track there is nothing for it to come after, so this jumped to a
+            // list that was always empty - and did it by shoving the dog off
+            // screen. Inside this case !has_track is exactly "the dog is up".
+            //
+            // Swipe UP is deliberately NOT gated the same way. It is the only
+            // route to Playlists, and Playlists is the only way to start
+            // playback or reach THEMES from the device; gating it on a track
+            // would mean nothing could ever be started, precisely when nothing
+            // is playing.
+            if (!st.pb.has_track) {
+              g_dog.react(views::DaisyIdle::Reaction::Swipe);
+              esp32::hapticsBump();
+              break;
+            }
             // Straight to what is coming up, without going through the chooser.
             g_screen = Screen::Tracks;
             g_sel = 0;

@@ -2447,6 +2447,239 @@ void test_daisy_is_bit_exact_across_runs(void) {
   TEST_ASSERT_EQUAL_INT(0, diffs);
 }
 
+// Daisy reacting to input. The idle screen is the one screen where a gesture
+// has nothing to control - there is no track to skip and nothing to pause - so
+// the dog IS the feedback. These tests are written against what you can see:
+// which animation is on screen, how long it stays, and whether she settles.
+
+void test_daisy_wakes_up_when_touched(void) {
+  views::DaisyIdle d;
+  d.begin();
+  TEST_ASSERT_EQUAL(daisy::Daisy_Sleep, d.anim());
+  d.react(views::DaisyIdle::Reaction::Touch);
+  TEST_ASSERT_EQUAL(daisy::Daisy_Alert, d.anim());
+}
+
+void test_daisy_gives_each_gesture_its_own_mood(void) {
+  // Same gesture, same reaction, every time: she is answering YOU, not
+  // shuffling. A random pick would read as a screensaver again.
+  struct Case {
+    views::DaisyIdle::Reaction r;
+    daisy::DaisyAnim expect;
+  } cases[] = {
+      {views::DaisyIdle::Reaction::Touch, daisy::Daisy_Alert},
+      {views::DaisyIdle::Reaction::Swipe, daisy::Daisy_Wag},
+      {views::DaisyIdle::Reaction::Hold, daisy::Daisy_Zoomies},
+      {views::DaisyIdle::Reaction::Turn, daisy::Daisy_Sniff},
+  };
+  for (const Case &c : cases) {
+    views::DaisyIdle d;
+    d.begin();
+    d.react(c.r);
+    TEST_ASSERT_EQUAL(c.expect, d.anim());
+  }
+}
+
+void test_daisy_settles_through_drowsy_on_her_way_back_to_sleep(void) {
+  // Snapping from zoomies straight to a sleeping dog reads as a dropped
+  // frame. One pass of drowsy is what makes it look like settling down.
+  views::DaisyIdle d;
+  d.begin();
+  d.react(views::DaisyIdle::Reaction::Hold);
+  const float dt = 1.0f / 30.0f;
+  bool saw_drowsy = false;
+  bool asleep_after_drowsy = false;
+  for (int f = 0; f < 30 * 10; ++f) {
+    d.update(dt);
+    if (d.anim() == daisy::Daisy_Drowsy) saw_drowsy = true;
+    else if (saw_drowsy && d.anim() == daisy::Daisy_Sleep)
+      asleep_after_drowsy = true;
+  }
+  TEST_ASSERT_TRUE(saw_drowsy);
+  TEST_ASSERT_TRUE(asleep_after_drowsy);
+}
+
+void test_daisy_holds_a_short_reaction_long_enough_to_read(void) {
+  // Zoomies is four frames at 100 ms. Played once through it is 0.4 s - a
+  // blink, and less than the haptic click that triggered it. The reaction
+  // LOOPS until its hold expires rather than playing once.
+  views::DaisyIdle d;
+  d.begin();
+  d.react(views::DaisyIdle::Reaction::Hold);
+  const float dt = 1.0f / 30.0f;
+  float still_zooming_s = 0.0f;
+  for (int f = 0; f < 30 * 10; ++f) {
+    d.update(dt);
+    if (d.anim() != daisy::Daisy_Zoomies) break;
+    still_zooming_s += dt;
+  }
+  TEST_ASSERT_TRUE(still_zooming_s > 2.0f);
+}
+
+void test_daisy_does_not_yawn_straight_after_waking(void) {
+  // The yawn timer was already most of the way to firing when the poke
+  // arrived; if it is not reset she wakes, reacts, settles, and immediately
+  // yawns - which looks like the reaction was the bug.
+  views::DaisyIdle d;
+  d.begin();
+  const float dt = 1.0f / 30.0f;
+  // Right up to the edge of a yawn.
+  for (int f = 0; f < static_cast<int>((views::DaisyIdle::YAWN_EVERY_S - 0.5f) / dt); ++f)
+    d.update(dt);
+  TEST_ASSERT_EQUAL(daisy::Daisy_Sleep, d.anim());
+  d.react(views::DaisyIdle::Reaction::Touch);
+  // Settle, then a couple of seconds of sleep. No yawn in that window.
+  bool yawned = false;
+  for (int f = 0; f < 30 * 8; ++f) {
+    d.update(dt);
+    if (d.anim() == daisy::Daisy_Yawn) yawned = true;
+  }
+  TEST_ASSERT_FALSE(yawned);
+}
+
+void test_daisy_extends_the_hold_when_poked_the_same_way_again(void) {
+  // Tapping twice must not restart the animation from frame 0 - that is a
+  // visible stutter. It keeps playing and stays up longer.
+  views::DaisyIdle d;
+  d.begin();
+  d.react(views::DaisyIdle::Reaction::Swipe);
+  const float dt = 1.0f / 30.0f;
+  for (int f = 0; f < 15; ++f) d.update(dt);
+  const int frame_before = d.frame();
+  d.react(views::DaisyIdle::Reaction::Swipe);
+  TEST_ASSERT_EQUAL(daisy::Daisy_Wag, d.anim());
+  TEST_ASSERT_EQUAL_INT(frame_before, d.frame());
+}
+
+void test_daisy_switches_mood_when_poked_a_different_way(void) {
+  views::DaisyIdle d;
+  d.begin();
+  d.react(views::DaisyIdle::Reaction::Swipe);
+  const float dt = 1.0f / 30.0f;
+  for (int f = 0; f < 10; ++f) d.update(dt);
+  d.react(views::DaisyIdle::Reaction::Hold);
+  TEST_ASSERT_EQUAL(daisy::Daisy_Zoomies, d.anim());
+  TEST_ASSERT_EQUAL_INT(0, d.frame());
+}
+
+void test_daisy_frame_index_stays_in_range_across_every_reaction(void) {
+  // Every animation has its own frame count, and the index reaches into a
+  // flash table. Switching mid-animation is exactly where an index survives
+  // one animation too long.
+  views::DaisyIdle d;
+  d.begin();
+  const views::DaisyIdle::Reaction all[] = {
+      views::DaisyIdle::Reaction::Touch, views::DaisyIdle::Reaction::Swipe,
+      views::DaisyIdle::Reaction::Hold, views::DaisyIdle::Reaction::Turn};
+  const float dt = 1.0f / 30.0f;
+  for (int f = 0; f < 30 * 60; ++f) {
+    if (f % 7 == 0) d.react(all[(f / 7) % 4]);
+    d.update(dt);
+    const daisy::AnimData &a = daisy::ANIMS[d.anim()];
+    TEST_ASSERT_TRUE(d.frame() >= 0);
+    TEST_ASSERT_TRUE(d.frame() < a.frame_count);
+  }
+}
+
+void test_daisy_is_bit_exact_across_runs_with_pokes(void) {
+  // The bit-exactness invariant has to survive the new input path: same dt
+  // sequence and same poke sequence, same pixels. A reaction that reached for
+  // a clock or an RNG would show up here.
+  gfx::Framebuffer a, b;
+  a.fill(0x0000);
+  b.fill(0x0000);
+  views::DaisyIdle da, db;
+  da.begin();
+  db.begin();
+  const float dt = 1.0f / 30.0f;
+  for (int f = 0; f < 200; ++f) {
+    if (f == 5) {
+      da.react(views::DaisyIdle::Reaction::Hold);
+      db.react(views::DaisyIdle::Reaction::Hold);
+    }
+    if (f == 90) {
+      da.react(views::DaisyIdle::Reaction::Turn);
+      db.react(views::DaisyIdle::Reaction::Turn);
+    }
+    da.update(dt);
+    db.update(dt);
+  }
+  gfx::Surface sa = fullSurface(a);
+  gfx::Surface sb = fullSurface(b);
+  da.renderBand(sa);
+  db.renderBand(sb);
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (a.at(x, y) != b.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+void test_daisy_mid_reaction_drawn_in_bands_matches_full_frame(void) {
+  // KNOB_BANDS=1 must render byte-identical to a full frame, and the reaction
+  // animations have different sprite extents than sleep does - zoomies is a
+  // dog mid-air, not one lying flat.
+  gfx::Framebuffer whole, banded;
+  whole.fill(0x0000);
+  banded.fill(0x0000);
+  views::DaisyIdle a, b;
+  a.begin();
+  b.begin();
+  a.react(views::DaisyIdle::Reaction::Hold);
+  b.react(views::DaisyIdle::Reaction::Hold);
+  for (int f = 0; f < 12; ++f) {
+    a.update(1.0f / 30.0f);
+    b.update(1.0f / 30.0f);
+  }
+  TEST_ASSERT_EQUAL(daisy::Daisy_Zoomies, a.anim());
+  gfx::Surface s = fullSurface(whole);
+  a.renderBand(s);
+  for (int y = 0; y < gfx::H; y += 20) {
+    gfx::Surface bs;
+    bs.px = banded.pixels() + static_cast<size_t>(y) * gfx::W;
+    bs.w = gfx::W;
+    bs.h = 20;
+    bs.y0 = y;
+    b.renderBand(bs);
+  }
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (whole.at(x, y) != banded.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+
+
+// ---------------------------------------------------------------------------
+// Transport feedback policy
+// ---------------------------------------------------------------------------
+
+void test_transport_feedback_shows_while_a_track_is_loaded(void) {
+  TEST_ASSERT_TRUE(shell::transportFeedbackVisible(true, true));
+}
+
+void test_transport_feedback_hides_when_nothing_is_listening(void) {
+  // No track AND no device: a play/pause glyph here claims a transport that
+  // does not exist. On the idle screen the flash is the ONLY visible answer a
+  // gesture gets - showToast has never been wired to a renderer - so a glyph
+  // that means nothing is worse than no glyph at all.
+  TEST_ASSERT_FALSE(shell::transportFeedbackVisible(false, false));
+}
+
+void test_transport_feedback_shows_for_an_idle_device_with_no_track(void) {
+  // Spotify open and active but with nothing loaded: /me/player answers 200
+  // with a null item, so has_track goes false while has_device stays true. A
+  // play command in this state genuinely can resume, so the furniture stays.
+  TEST_ASSERT_TRUE(shell::transportFeedbackVisible(false, true));
+}
+
+void test_transport_feedback_shows_for_a_track_without_a_known_device(void) {
+  // A command 404 clears has_device, but a track is still loaded and on
+  // screen. Stripping the transport off a visible now-playing view would be a
+  // worse lie than leaving it: the user can see the song.
+  TEST_ASSERT_TRUE(shell::transportFeedbackVisible(true, false));
+}
 
 // ---------------------------------------------------------------------------
 // Themes and the picker
@@ -3334,6 +3567,20 @@ int main(int, char **) {
   RUN_TEST(test_daisy_sleeps_then_yawns_then_sleeps_again);
   RUN_TEST(test_daisy_frame_index_is_always_in_range);
   RUN_TEST(test_daisy_is_bit_exact_across_runs);
+  RUN_TEST(test_daisy_wakes_up_when_touched);
+  RUN_TEST(test_daisy_gives_each_gesture_its_own_mood);
+  RUN_TEST(test_daisy_settles_through_drowsy_on_her_way_back_to_sleep);
+  RUN_TEST(test_daisy_holds_a_short_reaction_long_enough_to_read);
+  RUN_TEST(test_daisy_does_not_yawn_straight_after_waking);
+  RUN_TEST(test_daisy_extends_the_hold_when_poked_the_same_way_again);
+  RUN_TEST(test_daisy_switches_mood_when_poked_a_different_way);
+  RUN_TEST(test_daisy_frame_index_stays_in_range_across_every_reaction);
+  RUN_TEST(test_daisy_is_bit_exact_across_runs_with_pokes);
+  RUN_TEST(test_daisy_mid_reaction_drawn_in_bands_matches_full_frame);
+  RUN_TEST(test_transport_feedback_shows_while_a_track_is_loaded);
+  RUN_TEST(test_transport_feedback_hides_when_nothing_is_listening);
+  RUN_TEST(test_transport_feedback_shows_for_an_idle_device_with_no_track);
+  RUN_TEST(test_transport_feedback_shows_for_a_track_without_a_known_device);
   RUN_TEST(test_every_theme_has_a_name_and_a_distinct_spawn);
   RUN_TEST(test_rain_falls_and_the_others_do_not);
   RUN_TEST(test_rain_does_not_burst_on_the_beat);
