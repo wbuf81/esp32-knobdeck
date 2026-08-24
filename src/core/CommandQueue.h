@@ -31,6 +31,13 @@ enum class CommandType : uint8_t {
 struct Command {
   CommandType type = CommandType::None;
   int arg = 0;
+  // When the UI handed this over, for measuring how long it then waited.
+  //
+  // A queue fetch was once seen to take about six seconds against a measured
+  // 750ms request, and there was no way to tell which half was slow: the wait
+  // for the net task to pick the command up, or the request itself. Stamped on
+  // submit and reported on execution when the gap is large enough to matter.
+  uint32_t submitted_ms = 0;
   // A URI and a display name, for the browser commands.
   //
   // Fixed buffers rather than std::string: this struct crosses a FreeRTOS queue

@@ -42,7 +42,7 @@ class NetWorker {
   void stop();
 
   // UI side: enqueue a command for the net task to execute.
-  void submit(const Command &c);
+  void submit(const Command &in);
 
   // UI side: copy the shared state out for rendering.
   AppState snapshot();

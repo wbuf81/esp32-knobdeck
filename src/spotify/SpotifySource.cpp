@@ -622,10 +622,17 @@ void SpotifySource::playQueueItem(const Command &c, AppState *out,
     }
   }
 
-  // Re-read both sides, because the screen must show what happened rather than
-  // what was asked for. The player poll is nudged rather than called directly
-  // so the existing settle logic still owns when the new track is believed.
-  fetchQueue(out, now_ms);
+  // The queue is deliberately NOT re-read here.
+  //
+  // Measured: Spotify answers /me/player/queue with nothing at all for a moment
+  // after a context change - the read immediately after a successful jump came
+  // back "queue: 0 entries" every time. So the re-fetch was both too early to be
+  // true and a ~750ms request nobody was waiting on, since the confirmation
+  // screen already returns to the player. The next swipe-down fetches a queue
+  // that has settled.
+  //
+  // The player poll IS nudged, because the track on screen is now wrong and that
+  // is the thing the user is looking at.
   nudge();
 }
 
@@ -757,6 +764,13 @@ void SpotifySource::step(AppState *out, CommandQueue<> *cmds, uint32_t now_ms) {
 
   Command c;
   while (cmds->pop(&c)) {
+    // Only when it is bad enough to be felt. A command normally waits one 25ms
+    // tick, and logging that every button press would bury the case this exists
+    // to catch.
+    if (c.submitted_ms != 0 && now_ms - c.submitted_ms > 250) {
+      NETLOG("command %d waited %ums to start", (int)c.type,
+             (unsigned)(now_ms - c.submitted_ms));
+    }
     runCommand(c, out, now_ms);
   }
 

@@ -82,7 +82,9 @@ void NetWorker::taskEntry(void *self) {
 }
 #endif
 
-void NetWorker::submit(const Command &c) {
+void NetWorker::submit(const Command &in) {
+  Command c = in;
+  c.submitted_ms = nowMs();
   std::lock_guard<std::mutex> lk(mtx_);
   if (c.type == CommandType::SetVolume) {
     // Only the final volume matters; replace any pending one.
