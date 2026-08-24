@@ -27,6 +27,16 @@ class Backlight {
   static constexpr uint32_t DIM_AFTER_MS = 45000;
   static constexpr uint32_t OFF_AFTER_MS = 240000;
 
+  // How long a touch or a turn overrides a host that says it is asleep.
+  //
+  // Physical input always wins, and this is not a nicety. A stale or wrong
+  // host signal - a helper that died holding "locked", a renamed Mac, a
+  // half-finished experiment - would otherwise leave the screen dark with no
+  // way to get it back, because the thing that would clear it is the thing
+  // that is broken. Twice during development the display was left dark
+  // exactly this way. Touching it must always work.
+  static constexpr uint32_t INPUT_OVERRIDE_MS = 90000;
+
   // Called every frame.
   //
   // Takes the TIMESTAMP of the last input rather than a "was there input just

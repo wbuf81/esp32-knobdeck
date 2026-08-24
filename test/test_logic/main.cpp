@@ -1887,15 +1887,38 @@ void test_backlight_input_wakes_it_and_reports_the_wake(void) {
   TEST_ASSERT_FALSE(bl.justWoke());  // only on the frame it woke
 }
 
+void test_backlight_recent_input_beats_a_host_that_says_asleep(void) {
+  // The safety valve. A stale or wrong host signal - a dead helper stuck on
+  // "locked", a renamed Mac - must never hold the screen dark against the
+  // person in front of it, because the thing that would clear it is the thing
+  // that is broken. This happened twice during development.
+  core::Backlight bl;
+  const uint32_t touched = 10000;
+  bl.update(touched, /*playing=*/false, touched, /*host_asleep=*/true);
+  TEST_ASSERT_EQUAL(core::ScreenState::Bright, bl.state());
+
+  // Still overridden a while later.
+  bl.update(touched + core::Backlight::INPUT_OVERRIDE_MS - 1, false, touched,
+            true);
+  TEST_ASSERT_TRUE(bl.state() != core::ScreenState::Off);
+
+  // And once the override lapses, the host wins again.
+  bl.update(touched + core::Backlight::INPUT_OVERRIDE_MS, false, touched, true);
+  TEST_ASSERT_EQUAL(core::ScreenState::Off, bl.state());
+}
+
 void test_backlight_host_asleep_overrides_playback(void) {
   // If the machine it sits beside is asleep or locked, so is this - even mid
   // track, and without waiting out any idle timer.
   core::Backlight bl;
-  bl.update(1000, /*playing=*/true, /*last_input_ms=*/1000, /*host_asleep=*/true);
+  // Input long enough ago that the override has lapsed, so the host decides.
+  const uint32_t touched = 1000;
+  const uint32_t later = touched + core::Backlight::INPUT_OVERRIDE_MS + 1;
+  bl.update(later, /*playing=*/true, touched, /*host_asleep=*/true);
   TEST_ASSERT_EQUAL(core::ScreenState::Off, bl.state());
 
   // And it comes straight back when the host does.
-  bl.update(1100, true, 1000, false);
+  bl.update(later + 100, true, touched, false);
   TEST_ASSERT_EQUAL(core::ScreenState::Bright, bl.state());
 }
 
@@ -2102,6 +2125,7 @@ int main(int, char **) {
   RUN_TEST(test_backlight_stays_bright_while_playing);
   RUN_TEST(test_backlight_dims_then_sleeps_when_idle_and_stopped);
   RUN_TEST(test_backlight_input_wakes_it_and_reports_the_wake);
+  RUN_TEST(test_backlight_recent_input_beats_a_host_that_says_asleep);
   RUN_TEST(test_backlight_host_asleep_overrides_playback);
   RUN_TEST(test_backlight_survives_the_millis_wrap);
   RUN_TEST(test_hostlink_fails_open_before_any_heartbeat);

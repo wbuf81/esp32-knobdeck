@@ -73,17 +73,29 @@ void HostLink::poll(uint32_t now_ms, bool network_up) {
     known = true;
   }
 
+  // 200 with an explicit Content-Length, and flushed before the close.
+  //
+  // This was a bare 204 followed straight by stop(), which curl accepted and
+  // Node's fetch did not - it reported "fetch failed" for a request the device
+  // was answering. Closing the socket immediately after print() can drop the
+  // buffered bytes, and a 204 with no length header gives a strict client
+  // nothing to frame the response with. The heartbeat silently never arrived.
   if (known) {
     ever_heard_ = true;
     last_beat_ms_ = now_ms;
-    client.print("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+    client.print(
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"
+        "Connection: close\r\n\r\n");
   } else {
     // Anything else is answered plainly rather than ignored, so a person poking
     // at it with a browser learns what it wants.
-    client.print(
+    static const char kBody[] = "GET /awake or /locked, on a timer\n";
+    client.printf(
         "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n"
-        "Connection: close\r\n\r\nGET /awake or /locked, on a timer\r\n");
+        "Content-Length: %u\r\nConnection: close\r\n\r\n%s",
+        (unsigned)(sizeof(kBody) - 1), kBody);
   }
+  client.flush();
   client.stop();
 }
 
