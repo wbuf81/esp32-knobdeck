@@ -2,3 +2,4 @@
 .cache/
 .DS_Store
 src/config/secrets.h
+.claude.local.md
