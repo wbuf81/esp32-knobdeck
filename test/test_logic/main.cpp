@@ -36,6 +36,7 @@
 #include "shell/GestureFlash.h"
 #include "shell/Glyphs.h"
 #include "views/CoverLight.h"
+#include "views/DaisyIdle.h"
 #include "shell/ListView.h"
 #include "shell/NowPlaying.h"
 #include "shell/RadialShell.h"
@@ -2333,6 +2334,116 @@ void test_nowplaying_no_track_carries_no_heart(void) {
 
 
 // ---------------------------------------------------------------------------
+// DaisyIdle
+// ---------------------------------------------------------------------------
+
+void test_daisy_draws_the_dog_and_owns_every_pixel(void) {
+  // It replaces the backdrop rather than drawing over one, so it must leave no
+  // pixel untouched - a gap would show the previous frame through, and on a
+  // banded panel that is stale garbage rather than black.
+  gfx::Framebuffer fb;
+  fb.fill(0xF81F);  // magenta: anything left over is unmissable
+  views::DaisyIdle d;
+  d.begin();
+  d.update(1.0f / 30.0f);
+  gfx::Surface s = fullSurface(fb);
+  d.renderBand(s);
+  int leftover = 0, drawn = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x) {
+      if (fb.at(x, y) == 0xF81F) ++leftover;
+      else ++drawn;
+    }
+  TEST_ASSERT_EQUAL_INT(0, leftover);
+  TEST_ASSERT_TRUE(drawn > 1000);
+}
+
+void test_daisy_drawn_in_bands_matches_full_frame(void) {
+  gfx::Framebuffer whole, banded;
+  whole.fill(0x0000);
+  banded.fill(0x0000);
+  views::DaisyIdle a, b;
+  a.begin();
+  b.begin();
+  for (int f = 0; f < 12; ++f) {
+    a.update(1.0f / 30.0f);
+    b.update(1.0f / 30.0f);
+  }
+  gfx::Surface s = fullSurface(whole);
+  a.renderBand(s);
+  for (int y = 0; y < gfx::H; y += 20) {
+    gfx::Surface bs;
+    bs.px = banded.pixels() + static_cast<size_t>(y) * gfx::W;
+    bs.w = gfx::W;
+    bs.h = 20;
+    bs.y0 = y;
+    b.renderBand(bs);
+  }
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (whole.at(x, y) != banded.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+void test_daisy_sleeps_then_yawns_then_sleeps_again(void) {
+  // A completely static frame reads as a crash on a device that is otherwise
+  // always moving, so the sleep loop is interrupted now and then. The yawn must
+  // also HAND BACK - a view stuck mid-yawn would be worse than a still one.
+  views::DaisyIdle d;
+  d.begin();
+  TEST_ASSERT_EQUAL(daisy::Daisy_Sleep, d.anim());
+
+  const float dt = 1.0f / 30.0f;
+  bool saw_yawn = false;
+  bool back_to_sleep = false;
+  // Well past one yawn interval and the yawn's own length.
+  for (int f = 0; f < 30 * 40; ++f) {
+    d.update(dt);
+    if (d.anim() == daisy::Daisy_Yawn) saw_yawn = true;
+    else if (saw_yawn && d.anim() == daisy::Daisy_Sleep) back_to_sleep = true;
+  }
+  TEST_ASSERT_TRUE(saw_yawn);
+  TEST_ASSERT_TRUE(back_to_sleep);
+}
+
+void test_daisy_frame_index_is_always_in_range(void) {
+  // The frame index reaches into a flash table. Off the end is not a glitch,
+  // it is a read of whatever follows the sprite data.
+  views::DaisyIdle d;
+  d.begin();
+  for (int f = 0; f < 30 * 120; ++f) {
+    d.update(1.0f / 30.0f);
+    const daisy::AnimData &a = daisy::ANIMS[d.anim()];
+    TEST_ASSERT_TRUE(d.frame() >= 0);
+    TEST_ASSERT_TRUE(d.frame() < a.frame_count);
+  }
+}
+
+void test_daisy_is_bit_exact_across_runs(void) {
+  gfx::Framebuffer a, b;
+  a.fill(0x0000);
+  b.fill(0x0000);
+  views::DaisyIdle da, db;
+  da.begin();
+  db.begin();
+  for (int f = 0; f < 200; ++f) {
+    da.update(1.0f / 30.0f);
+    db.update(1.0f / 30.0f);
+  }
+  gfx::Surface sa = fullSurface(a);
+  gfx::Surface sb = fullSurface(b);
+  da.renderBand(sa);
+  db.renderBand(sb);
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (a.at(x, y) != b.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+
+// ---------------------------------------------------------------------------
 // Backlight
 // ---------------------------------------------------------------------------
 
@@ -2639,6 +2750,11 @@ int main(int, char **) {
   RUN_TEST(test_nowplaying_unknown_saved_state_draws_no_heart);
   RUN_TEST(test_nowplaying_draws_both_saved_states_differently);
   RUN_TEST(test_nowplaying_no_track_carries_no_heart);
+  RUN_TEST(test_daisy_draws_the_dog_and_owns_every_pixel);
+  RUN_TEST(test_daisy_drawn_in_bands_matches_full_frame);
+  RUN_TEST(test_daisy_sleeps_then_yawns_then_sleeps_again);
+  RUN_TEST(test_daisy_frame_index_is_always_in_range);
+  RUN_TEST(test_daisy_is_bit_exact_across_runs);
   RUN_TEST(test_backlight_stays_bright_while_playing);
   RUN_TEST(test_backlight_dims_then_sleeps_when_idle_and_stopped);
   RUN_TEST(test_backlight_input_wakes_it_and_reports_the_wake);

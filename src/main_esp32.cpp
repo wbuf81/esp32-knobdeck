@@ -49,6 +49,7 @@
 #include "shell/NowPlaying.h"
 #include "shell/RadialShell.h"
 #include "views/CoverLight.h"
+#include "views/DaisyIdle.h"
 
 namespace {
 
@@ -65,6 +66,7 @@ shell::NowPlaying g_nowplaying;
 shell::ListView g_list;
 shell::ConfirmRing g_confirm;
 shell::GestureFlash g_flash;
+views::DaisyIdle g_dog;
 spotify::Library g_library;
 
 // Which screen is up.
@@ -193,6 +195,9 @@ void setup() {
 
   const uint32_t seed = fnv1a("first-light");
   g_view.begin(seed);
+  // Once, at boot. The dog's loop is its own and does not restart per track -
+  // she is asleep between songs, not asleep about a particular song.
+  g_dog.begin();
   g_analyzer.begin(nullptr);  // no microphone yet: I2S pins are unconfirmed
   g_analyzer.setTrack(seed);
 
@@ -580,6 +585,15 @@ void loop() {
   }
   g_view.setAmbient(g_screen != Screen::Player);
 
+  // Nothing playing, and the player screen is up: the dog has it.
+  //
+  // A particle field with no music behind it reacts to nothing - it is a
+  // screensaver wearing a visualiser's clothes. The browser screens stay as they
+  // are, because you can be looking through playlists precisely BECAUSE nothing
+  // is playing, and replacing the list with a sleeping dog would be answering a
+  // question nobody asked.
+  const bool idle_dog = !st.pb.has_track && g_screen == Screen::Player;
+
   g_analyzer.update(&g_mod, dt);
   g_mod.progress01 = st.pb.duration_ms
                          ? static_cast<float>(shown_progress) /
@@ -587,7 +601,10 @@ void loop() {
                          : 0.0f;
   g_mod.volume01 = st.pb.volume_pct >= 0 ? st.pb.volume_pct * 0.01f : 0.7f;
 
-  g_view.update(g_mod, dt, g_rng);
+  if (idle_dog) g_dog.update(dt);
+  else g_view.update(g_mod, dt, g_rng);
+
+  const uint16_t view_tint = idle_dog ? g_dog.tint() : g_view.tint();
 
   // Measured, truncated and formatted once per frame, not once per band.
   g_flash.prepare(now);
@@ -637,25 +654,37 @@ void loop() {
       s.w = gfx::W;
       s.h = esp32::PANEL_BAND_H;
       s.y0 = y;
-      g_view.renderBand(s);
+      if (idle_dog) g_dog.renderBand(s);
+      else g_view.renderBand(s);
       // The shell draws over the view, in the same band, before it is pushed.
       const uint64_t sh0 = esp_timer_get_time();
-      g_shell.render(s, g_mod.progress01, g_view.tint(),
-                     g_volume >= 0 ? g_volume : st.pb.volume_pct, now,
-                     g_mod.bass);
+      // The dog carries the whole message. A progress ring at zero and a title
+      // reading "nothing playing" over the top of her would be the device saying
+      // the same thing three times, twice of them in furniture.
+      if (!idle_dog) {
+        g_shell.render(s, g_mod.progress01, view_tint,
+                       g_volume >= 0 ? g_volume : st.pb.volume_pct, now,
+                       g_mod.bass);
+      }
       const uint64_t sh1 = esp_timer_get_time();
-      if (g_screen == Screen::Player) g_nowplaying.render(s, g_view.tint());
-      else if (g_screen == Screen::Confirm) g_confirm.render(s, g_view.tint());
-      else g_list.render(s, g_view.tint());
+      if (idle_dog) {
+        // nothing over the dog but the gesture flash
+      } else if (g_screen == Screen::Player) {
+        g_nowplaying.render(s, view_tint);
+      } else if (g_screen == Screen::Confirm) {
+        g_confirm.render(s, view_tint);
+      } else {
+        g_list.render(s, view_tint);
+      }
       // Last, so the answer is never behind the thing it is answering about.
-      g_flash.render(s, g_view.tint());
+      g_flash.render(s, view_tint);
       const uint64_t sh2 = esp_timer_get_time();
       g_shell_us += sh1 - sh0;
       g_text_us += sh2 - sh1;
       esp32::panelCommitBand();
     }
     esp32::panelEndFrame();
-    g_view.endFrame();
+    if (!idle_dog) g_view.endFrame();
   }
 
   g_total_us += esp_timer_get_time() - t_frame;
