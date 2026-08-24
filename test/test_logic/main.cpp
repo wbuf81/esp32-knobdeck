@@ -29,6 +29,8 @@
 #include "audio/Fft.h"
 #include "audio/Procedural.h"
 #include "fx/Particles.h"
+#include "fx/ThemePicker.h"
+#include "fx/Themes.h"
 #include "gfx/Quad3D.h"
 #include "gfx/fonts/Fonts.h"
 #include "input/Gesture.h"
@@ -2444,6 +2446,137 @@ void test_daisy_is_bit_exact_across_runs(void) {
 
 
 // ---------------------------------------------------------------------------
+// Themes and the picker
+// ---------------------------------------------------------------------------
+
+void test_every_theme_has_a_name_and_a_distinct_spawn(void) {
+  // A theme that configures the pool identically to another is not a theme,
+  // it is a duplicate row on a menu.
+  uint16_t pal[16];
+  for (int i = 0; i < 16; ++i) pal[i] = static_cast<uint16_t>(0x1111 * i);
+  const int n = static_cast<int>(fx::ThemeId::Count);
+  TEST_ASSERT_TRUE(n >= 2);
+  for (int i = 0; i < n; ++i) {
+    const fx::ThemeId a = static_cast<fx::ThemeId>(i);
+    TEST_ASSERT_NOT_NULL(fx::themeName(a));
+    TEST_ASSERT_TRUE(fx::themeName(a)[0] != '?');
+    fx::SpawnParams pa;
+    fx::themeSpawn(a, pal, &pa);
+    for (int j = i + 1; j < n; ++j) {
+      fx::SpawnParams pb;
+      fx::themeSpawn(static_cast<fx::ThemeId>(j), pal, &pb);
+      const bool same = pa.spread == pb.spread && pa.speed_max == pb.speed_max &&
+                        pa.gravity_y == pb.gravity_y && pa.drag == pb.drag;
+      TEST_ASSERT_FALSE(same);
+    }
+  }
+}
+
+void test_rain_falls_and_the_others_do_not(void) {
+  // Gravity is what makes rain rain. Without it the theme is a differently
+  // tuned starfield.
+  uint16_t pal[16] = {};
+  fx::SpawnParams rain, cover;
+  fx::themeSpawn(fx::ThemeId::Rain, pal, &rain);
+  fx::themeSpawn(fx::ThemeId::CoverLight, pal, &cover);
+  TEST_ASSERT_TRUE(rain.gravity_y > 100.0f);
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, cover.gravity_y);
+}
+
+void test_rain_does_not_burst_on_the_beat(void) {
+  // Rain reacting to a kick drum would be two effects fighting.
+  audio::Modulation m;
+  m.bass = 1.0f;
+  m.loudness = 1.0f;
+  TEST_ASSERT_EQUAL_INT(0, fx::themeBurst(fx::ThemeId::Rain, m, false));
+  TEST_ASSERT_TRUE(fx::themeBurst(fx::ThemeId::Heartbeat, m, false) > 0);
+}
+
+void test_theme_emission_is_frame_rate_independent(void) {
+  // The same second of music must emit about the same number of particles
+  // whether it was 30 frames or 60. The accumulator is the whole point.
+  audio::Modulation m;
+  m.loudness = 0.5f;
+  float acc30 = 0.0f, acc60 = 0.0f;
+  int n30 = 0, n60 = 0;
+  for (int i = 0; i < 30; ++i)
+    n30 += fx::themeEmit(fx::ThemeId::Rain, m, 1.0f / 30.0f, false, &acc30);
+  for (int i = 0; i < 60; ++i)
+    n60 += fx::themeEmit(fx::ThemeId::Rain, m, 1.0f / 60.0f, false, &acc60);
+  const int diff = n30 > n60 ? n30 - n60 : n60 - n30;
+  TEST_ASSERT_TRUE(n30 > 100);
+  TEST_ASSERT_TRUE(diff <= 2);
+}
+
+void test_picker_shuffle_never_repeats_the_current_theme(void) {
+  // A shuffle that hands back what is already showing reads as broken, not as
+  // random. This is the assertion that stops a naive rng % n from shipping.
+  fx::ThemePicker p;
+  core::Rng rng(0xBEEF);
+  p.setShuffle();
+  for (int i = 0; i < 400; ++i) {
+    const fx::ThemeId before = p.current();
+    p.onTrackChange(rng);
+    TEST_ASSERT_TRUE(p.current() != before);
+  }
+}
+
+void test_picker_shuffle_reaches_every_theme(void) {
+  // ...and it must still reach all of them, not just alternate between two.
+  fx::ThemePicker p;
+  core::Rng rng(0x1234);
+  p.setShuffle();
+  bool seen[static_cast<int>(fx::ThemeId::Count)] = {};
+  for (int i = 0; i < 600; ++i) {
+    p.onTrackChange(rng);
+    seen[static_cast<int>(p.current())] = true;
+  }
+  for (int i = 0; i < static_cast<int>(fx::ThemeId::Count); ++i)
+    TEST_ASSERT_TRUE(seen[i]);
+}
+
+void test_picker_locked_theme_survives_a_track_change(void) {
+  fx::ThemePicker p;
+  core::Rng rng(1);
+  p.lock(fx::ThemeId::Rain);
+  for (int i = 0; i < 50; ++i) p.onTrackChange(rng);
+  TEST_ASSERT_FALSE(p.shuffle());
+  TEST_ASSERT_TRUE(p.current() == fx::ThemeId::Rain);
+}
+
+void test_picker_rows_map_to_the_list(void) {
+  fx::ThemePicker p;
+  core::Rng rng(7);
+  TEST_ASSERT_EQUAL_STRING("Shuffle", fx::ThemePicker::rowName(0));
+  p.chooseRow(2, rng);  // row 0 is Shuffle, so row 2 is theme 1
+  TEST_ASSERT_FALSE(p.shuffle());
+  TEST_ASSERT_EQUAL_INT(2, p.currentRow());
+  p.chooseRow(0, rng);
+  TEST_ASSERT_TRUE(p.shuffle());
+  TEST_ASSERT_EQUAL_INT(0, p.currentRow());
+}
+
+void test_picker_round_trips_through_storage(void) {
+  core::Rng rng(3);
+  for (int row = 0; row < fx::ThemePicker::ROWS; ++row) {
+    fx::ThemePicker a;
+    a.chooseRow(row, rng);
+    fx::ThemePicker b;
+    b.fromStored(a.toStored());
+    TEST_ASSERT_EQUAL_INT(a.shuffle() ? 1 : 0, b.shuffle() ? 1 : 0);
+    if (!a.shuffle()) TEST_ASSERT_TRUE(a.current() == b.current());
+  }
+}
+
+void test_picker_rejects_a_stored_value_from_a_bigger_build(void) {
+  // Flashing an older build must not index off the end of the enum.
+  fx::ThemePicker p;
+  p.fromStored(9999u);
+  TEST_ASSERT_TRUE(p.shuffle());
+}
+
+
+// ---------------------------------------------------------------------------
 // Backlight
 // ---------------------------------------------------------------------------
 
@@ -2755,6 +2888,16 @@ int main(int, char **) {
   RUN_TEST(test_daisy_sleeps_then_yawns_then_sleeps_again);
   RUN_TEST(test_daisy_frame_index_is_always_in_range);
   RUN_TEST(test_daisy_is_bit_exact_across_runs);
+  RUN_TEST(test_every_theme_has_a_name_and_a_distinct_spawn);
+  RUN_TEST(test_rain_falls_and_the_others_do_not);
+  RUN_TEST(test_rain_does_not_burst_on_the_beat);
+  RUN_TEST(test_theme_emission_is_frame_rate_independent);
+  RUN_TEST(test_picker_shuffle_never_repeats_the_current_theme);
+  RUN_TEST(test_picker_shuffle_reaches_every_theme);
+  RUN_TEST(test_picker_locked_theme_survives_a_track_change);
+  RUN_TEST(test_picker_rows_map_to_the_list);
+  RUN_TEST(test_picker_round_trips_through_storage);
+  RUN_TEST(test_picker_rejects_a_stored_value_from_a_bigger_build);
   RUN_TEST(test_backlight_stays_bright_while_playing);
   RUN_TEST(test_backlight_dims_then_sleeps_when_idle_and_stopped);
   RUN_TEST(test_backlight_input_wakes_it_and_reports_the_wake);

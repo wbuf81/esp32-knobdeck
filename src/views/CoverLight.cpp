@@ -86,30 +86,35 @@ void CoverLight::begin(uint32_t track_seed) {
   bloom_.setStrength(140);
 
   fx::SpawnParams p;
+  fx::themeSpawn(theme_, palette_, &p);
   p.x = static_cast<float>(gfx::CX);
   p.y = static_cast<float>(gfx::CY);
-  // These speeds are set by what a streak needs, not by what looks right static.
-  //
-  // A particle is drawn as a segment from its previous position to its current
-  // one, so at 60 fps a speed of 52 px/s moves it 0.87 px per frame and there is
-  // simply no streak to draw. Comet speeds with heavy drag give a fast bright
-  // dash that decelerates into a drifting mote, which is the whole effect.
-  p.spread = 54.0f;
-  p.speed_min = 40.0f;
-  p.speed_max = 210.0f;
-  p.life_min = 1.5f;
-  p.life_max = 4.0f;
-  p.size_min = 1.0f;
-  p.size_max = 3.4f;
-  p.drag = 0.30f;  // sheds most of its speed in the first half second
-  p.gravity_y = 0.0f;
-  for (int i = 0; i < 16; ++i) p.colors[i] = palette_[i];
-  p.color_count = 16;
+  // The speeds themselves are per-theme and live in fx::Themes, alongside the
+  // reasoning for each. The one thing that is NOT per-theme is that a particle
+  // is drawn as a segment from its previous position to its current one, so
+  // anything under about 52 px/s moves less than a pixel per frame at 60fps and
+  // has no streak to draw. Every theme's speeds respect that or deliberately
+  // trade it for something else.
   parts_.configure(p);
   parts_.clear();
 
   for (int i = 0; i < MAX_RINGS; ++i) rings_[i] = Ring();
   clock_ = 0.0f;
+  emit_acc_ = 0.0f;
+}
+
+void CoverLight::setTheme(fx::ThemeId id) {
+  if (id == theme_) return;
+  theme_ = id;
+  fx::SpawnParams p;
+  fx::themeSpawn(theme_, palette_, &p);
+  // The origin is re-anchored to the cover on the very next update(), so what
+  // is set here only has to be a sane starting point.
+  p.x = static_cast<float>(gfx::CX);
+  p.y = static_cast<float>(gfx::CY);
+  parts_.configure(p);
+  // Deliberately NOT parts_.clear(). Live particles die off on their own, so a
+  // theme change crossfades over a second or two instead of blinking.
   emit_acc_ = 0.0f;
 }
 
@@ -295,10 +300,17 @@ void CoverLight::update(const audio::Modulation &m, float dt, core::Rng &rng) {
   // lopsided - more below the cover than above it. Projecting the cover's own
   // centre through the same transform the quad uses costs one divide a frame and
   // makes the field genuinely radiate from behind the album.
-  const gfx::Vec3 c = toView(0.0f, 0.0f);
-  parts_.setOrigin(
-      static_cast<float>(gfx::CX) + c.x * gfx::Quad3D::FOCAL / c.z,
-      static_cast<float>(gfx::CY) + c.y * gfx::Quad3D::FOCAL / c.z);
+  if (theme_ == fx::ThemeId::Rain) {
+    // Rain comes from the sky, not from the album. Spawned above the top of the
+    // disc so a drop is already at full speed by the time it is visible -
+    // starting them on screen makes the top edge look like a spawn line.
+    parts_.setOrigin(static_cast<float>(gfx::CX), -24.0f);
+  } else {
+    const gfx::Vec3 c = toView(0.0f, 0.0f);
+    parts_.setOrigin(
+        static_cast<float>(gfx::CX) + c.x * gfx::Quad3D::FOCAL / c.z,
+        static_cast<float>(gfx::CY) + c.y * gfx::Quad3D::FOCAL / c.z);
+  }
 
   // Advance rings.
   for (int k = 0; k < MAX_RINGS; ++k) {
@@ -310,11 +322,10 @@ void CoverLight::update(const audio::Modulation &m, float dt, core::Rng &rng) {
   }
 
   if (m.onset) {
-    spawnRing(1.0f, m.bass);
+    spawnRing(fx::themeRingScale(theme_), m.bass);
     // Comet-fast, so the streaks actually streak. See SpawnParams below.
-    parts_.burst(
-        static_cast<int>((90 + 110.0f * m.bass) * (ambient_ ? 0.25f : 1.0f)),
-        0.85f + m.bass, rng);
+    const int burst = fx::themeBurst(theme_, m, ambient_);
+    if (burst > 0) parts_.burst(burst, 0.85f + m.bass, rng);
     half_beat_pending_ = true;
   }
 
@@ -323,17 +334,13 @@ void CoverLight::update(const audio::Modulation &m, float dt, core::Rng &rng) {
   // having a train of them rather than one.
   if (half_beat_pending_ && m.beat_phase > 0.5f) {
     half_beat_pending_ = false;
-    spawnRing(0.5f, m.bass * 0.6f);
+    spawnRing(0.5f * fx::themeRingScale(theme_), m.bass * 0.6f);
   }
 
   // A steady drizzle so the field never empties between beats. Accumulated as a
   // float so the rate is frame-rate independent rather than per-frame.
-  emit_acc_ += (44.0f + 76.0f * m.loudness) * (ambient_ ? 0.30f : 1.0f) * dt;
-  const int n = static_cast<int>(emit_acc_);
-  if (n > 0) {
-    emit_acc_ -= static_cast<float>(n);
-    parts_.emit(n, rng);
-  }
+  const int n = fx::themeEmit(theme_, m, dt, ambient_, &emit_acc_);
+  if (n > 0) parts_.emit(n, rng);
 
   parts_.update(dt);
   buildGradient(m);

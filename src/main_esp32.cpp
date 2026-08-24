@@ -50,6 +50,8 @@
 #include "shell/RadialShell.h"
 #include "views/CoverLight.h"
 #include "views/DaisyIdle.h"
+#include "fx/ThemePicker.h"
+#include "config/ThemePref.h"
 
 namespace {
 
@@ -67,6 +69,7 @@ shell::ListView g_list;
 shell::ConfirmRing g_confirm;
 shell::GestureFlash g_flash;
 views::DaisyIdle g_dog;
+fx::ThemePicker g_picker;
 spotify::Library g_library;
 
 // Which screen is up.
@@ -77,7 +80,7 @@ spotify::Library g_library;
 // Confirm is a leaf off Tracks and nothing else: you can only arrive from a tap
 // on a queue row, and both answers leave immediately. Still flat, still one way
 // between each pair.
-enum class Screen : uint8_t { Player, Playlists, Tracks, Confirm };
+enum class Screen : uint8_t { Player, Playlists, Tracks, Confirm, Themes };
 Screen g_screen = Screen::Player;
 
 int g_sel = 0;            // the selected row
@@ -98,6 +101,7 @@ float g_confirm_pos = 0.0f;   // eased, so the marker glides like the list does
 const char *g_items[spotify::Library::MAX_TRACKS];
 
 int listCount() {
+  if (g_screen == Screen::Themes) return fx::ThemePicker::ROWS;
   if (g_screen == Screen::Playlists) return g_library.playlistCount();
   if (g_screen == Screen::Tracks) return g_library.trackCount();
   return 0;
@@ -198,6 +202,12 @@ void setup() {
   // Once, at boot. The dog's loop is its own and does not restart per track -
   // she is asleep between songs, not asleep about a particular song.
   g_dog.begin();
+  // The stored choice, before the first frame - so a locked theme is never
+  // visibly replaced by the default one on the way up.
+  g_picker.fromStored(config::loadTheme(g_picker.toStored()));
+  g_view.setTheme(g_picker.current());
+  LOGF("theme: %s%s", fx::themeName(g_picker.current()),
+       g_picker.shuffle() ? " (shuffle)" : " (locked)");
   g_analyzer.begin(nullptr);  // no microphone yet: I2S pins are unconfirmed
   g_analyzer.setTrack(seed);
 
@@ -265,6 +275,10 @@ void loop() {
     const uint32_t seed = st.pb.track_id[0] ? fnv1a(st.pb.track_id)
                                             : fnv1a("first-light");
     g_view.begin(seed);
+    // Rolled before the view is told, so a shuffled track never renders one
+    // frame of the outgoing theme.
+    g_picker.onTrackChange(g_rng);
+    g_view.setTheme(g_picker.current());
     g_analyzer.setTrack(seed);
     // Fall back to the synthetic cover until the real one arrives. The ancestor
     // notes why this matters: "no artwork" text during the second every uncached
@@ -487,8 +501,40 @@ void loop() {
             g_sel = 0;
             g_sel_pos = 0.0f;
           }
+        } else if (g == input::Gesture::SwipeUp) {
+          // One further out. Down still goes home from anywhere, so the whole
+          // rule is "up = further out, down = home" - which is simpler than the
+          // hub it replaces, and costs no gesture a second meaning.
+          g_screen = Screen::Themes;
+          g_sel = g_picker.currentRow();
+          g_sel_pos = static_cast<float>(g_sel);
+          g_flash.show(shell::Glyph::ChevronUp, now);
+          esp32::hapticsBump();
         } else if (g == input::Gesture::SwipeDown) {
           g_screen = Screen::Player;
+          g_flash.show(shell::Glyph::ChevronDown, now);
+          esp32::hapticsBump();
+        }
+        break;
+
+      case Screen::Themes:
+        if (g == input::Gesture::Tap) {
+          g_picker.chooseRow(g_sel, g_rng);
+          g_view.setTheme(g_picker.current());
+          config::saveTheme(g_picker.toStored());
+          LOGF("theme: %s%s", fx::themeName(g_picker.current()),
+               g_picker.shuffle() ? " (shuffle)" : " (locked)");
+          // Back to the player, because the thing you just changed is only
+          // visible there - the same reason picking a playlist goes home.
+          g_screen = Screen::Player;
+          g_sel = 0;
+          g_sel_pos = 0.0f;
+          esp32::hapticsClick();
+        } else if (g == input::Gesture::SwipeDown) {
+          g_screen = Screen::Player;
+          g_sel = 0;
+          g_sel_pos = 0.0f;
+          g_flash.show(shell::Glyph::ChevronDown, now);
           esp32::hapticsBump();
         }
         break;
@@ -569,12 +615,18 @@ void loop() {
   //
   // Not on Confirm: the jump republishes the queue, and that must not yank the
   // row out from under the question being asked about it.
-  if (g_screen == Screen::Playlists || g_screen == Screen::Tracks) {
-    const uint32_t gen = g_library.generation();
-    if (gen != g_lib_gen) {
-      g_lib_gen = gen;
-      g_sel = 0;
-      g_sel_pos = 0.0f;
+  if (g_screen == Screen::Playlists || g_screen == Screen::Tracks ||
+      g_screen == Screen::Themes) {
+    // The generation reset is about LIBRARY listings only. The themes list is
+    // fixed, so a playlist fetch landing in the background must not yank the
+    // selection off the row you are aiming at.
+    if (g_screen != Screen::Themes) {
+      const uint32_t gen = g_library.generation();
+      if (gen != g_lib_gen) {
+        g_lib_gen = gen;
+        g_sel = 0;
+        g_sel_pos = 0.0f;
+      }
     }
     // Ease toward the selection. Frame-rate independent, and clamped so a big
     // jump still arrives rather than crawling.
@@ -610,6 +662,13 @@ void loop() {
   g_flash.prepare(now);
   if (g_screen == Screen::Player) {
     g_nowplaying.prepare(st.pb, shown_progress);
+  } else if (g_screen == Screen::Themes) {
+    const int n = fx::ThemePicker::ROWS;
+    for (int i = 0; i < n; ++i) g_items[i] = fx::ThemePicker::rowName(i);
+    // `current` is what ListView already uses to tint the row you are on - built
+    // for UP NEXT, and exactly right for "this is the theme showing now".
+    g_list.prepare(g_items, n, g_sel_pos, "THEMES", false, nullptr,
+                   g_picker.currentRow());
   } else if (g_screen == Screen::Confirm) {
     const spotify::Entry *e = g_library.track(g_confirm_row);
     g_confirm.prepare(e ? e->name : nullptr, g_confirm_pos);

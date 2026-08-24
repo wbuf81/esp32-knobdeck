@@ -18,6 +18,7 @@
 #include "core/Rng.h"
 #include "art/Image.h"
 #include "fx/Particles.h"
+#include "fx/Themes.h"
 #include "gfx/BloomBand.h"
 #include "gfx/Quad3D.h"
 #include "gfx/Surface.h"
@@ -40,6 +41,13 @@ class CoverLight {
   static constexpr int MAX_RINGS = 8;
 
   void begin(uint32_t track_seed);
+
+  // Swaps the emission strategy without disturbing anything expensive: the
+  // pool, the gradient table and the bloom accumulator all stay put. Live
+  // particles are left to die off naturally rather than cleared, so a change
+  // mid-track crossfades instead of blinking.
+  void setTheme(fx::ThemeId id);
+  fx::ThemeId theme() const { return theme_; }
 
   // Borrowed, not owned: the cover lives in PSRAM and outlives any one view.
   // Null renders the backdrop and particles alone, which must look deliberate
@@ -156,6 +164,7 @@ class CoverLight {
   Timing t_;
   bool bloom_locked_ = false;
   bool particles_on_ = true;
+  fx::ThemeId theme_ = fx::ThemeId::CoverLight;
   bool ambient_ = false;
 };
 
