@@ -55,6 +55,12 @@ class CoverLight {
   void endFrame() { bloom_.endFrame(); }
 
   int particleCount() const { return parts_.live(); }
+  // The cover's current half-extent in local units. Exposed for the same reason
+  // particleCount() is: the slow breath is a number, and asserting on the number
+  // is honest where asserting on pixels is not - the orbit's foreshortening
+  // moves the cover's on-screen width by more than the breath does, so a pixel
+  // measurement cannot separate the two.
+  float coverHalf() const { return cover_half_; }
   // The album-derived accent colour, so the shell's progress ring belongs to
   // the same image rather than being a fixed brand colour laid over it.
   uint16_t tint() const { return tint_; }

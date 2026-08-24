@@ -33,6 +33,7 @@
 #include "gfx/fonts/Fonts.h"
 #include "input/Gesture.h"
 #include "shell/ConfirmRing.h"
+#include "views/CoverLight.h"
 #include "shell/ListView.h"
 #include "shell/RadialShell.h"
 #include "spotify/Library.h"
@@ -1995,6 +1996,135 @@ void test_confirmring_drawn_in_bands_matches_full_frame(void) {
 
 
 // ---------------------------------------------------------------------------
+// CoverLight
+//
+// The album cover is the SUBJECT of this view, and the particle field is the
+// light around it. These assert that relationship holds, because the field was
+// once drawn over the face and washed the artwork out.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Drives the view for `frames` fixed steps and leaves the result in `fb`. Fixed
+// dt and a fixed seed on purpose: this engine's determinism is an invariant, and
+// a test that fed it a real clock could not assert anything frame-by-frame.
+void runCoverLight(gfx::Framebuffer &fb, const art::Image *cover, bool particles,
+                   int frames) {
+  views::CoverLight v;
+  v.begin(0xABCD1234u);
+  v.setCover(cover);
+  v.setParticlesEnabled(particles);
+  core::Rng rng(0x1234u);
+  audio::Modulation m;
+  m.loudness = 0.6f;
+  m.bass = 0.4f;
+  for (int f = 0; f < frames; ++f) {
+    m.beat_phase = static_cast<float>(f % 30) / 30.0f;
+    m.onset = (f % 30) == 0;
+    v.update(m, 1.0f / 30.0f, rng);
+    gfx::Surface s = fullSurface(fb);
+    v.renderBand(s);
+    v.endFrame();
+  }
+}
+
+}  // namespace
+
+void test_coverlight_particles_do_not_wash_out_the_cover(void) {
+  // The complaint this was written for: the field was additive and drawn last,
+  // so streaks crossed the artwork and the album became hard to see. Behind the
+  // cover, the field cannot touch the face at all - so the centre of the cover
+  // must be byte-identical whether the field is running or switched off.
+  art::Image cover;
+  fillCornerTexture(cover);
+
+  gfx::Framebuffer with, without;
+  with.fill(0x0000);
+  without.fill(0x0000);
+  runCoverLight(with, &cover, /*particles=*/true, 20);
+  runCoverLight(without, &cover, /*particles=*/false, 20);
+
+  // The cover's centre projects to CX, CY + GROUP_Y * FOCAL / 1.62 - about 16
+  // pixels above centre. The box is kept well inside the ~49px half-extent so
+  // the orbit and the tilt cannot swing an edge into it.
+  const int cx = gfx::CX;
+  const int cy = gfx::CY - 16;
+  int diffs = 0;
+  for (int y = cy - 15; y <= cy + 15; ++y)
+    for (int x = cx - 15; x <= cx + 15; ++x)
+      if (with.at(x, y) != without.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+
+  // ...and the field must still be visibly THERE. A test that passed by drawing
+  // no particles at all would be worse than no test.
+  int outer = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (with.at(x, y) != without.at(x, y)) ++outer;
+  TEST_ASSERT_TRUE(outer > 200);
+}
+
+void test_coverlight_is_bit_exact_across_runs(void) {
+  // Headless runs are bit-exact: effects take dt and a seed and never read a
+  // clock. The slow breathing pulse on the cover is driven from accumulated dt
+  // for exactly this reason, and this is the assertion that keeps it honest.
+  art::Image cover;
+  fillCornerTexture(cover);
+
+  gfx::Framebuffer a, b;
+  a.fill(0x0000);
+  b.fill(0x0000);
+  runCoverLight(a, &cover, true, 25);
+  runCoverLight(b, &cover, true, 25);
+
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (a.at(x, y) != b.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+void test_coverlight_cover_breathes_over_time(void) {
+  // The slow pulse, asserted on the size itself rather than on pixels.
+  //
+  // A pixel measurement was tried first and cannot work: the cover's on-screen
+  // width also carries the orbit's foreshortening, which swings it by about 9%
+  // against the breath's 4%, so the two cannot be told apart from the outside.
+  //
+  // Audio held completely silent, so bass contributes nothing and the only thing
+  // left moving the size is the breath.
+  views::CoverLight v;
+  v.begin(0x5555u);
+  v.setParticlesEnabled(false);
+  core::Rng rng(0x99u);
+  audio::Modulation m;  // silent: no bass, no onset, no loudness
+
+  float lo = 1e9f, hi = -1e9f, sum = 0.0f;
+  // Twenty seconds at 30fps, comfortably more than one ~18s breath.
+  const int frames = 600;
+  for (int f = 0; f < frames; ++f) {
+    v.update(m, 1.0f / 30.0f, rng);
+    const float h = v.coverHalf();
+    if (h < lo) lo = h;
+    if (h > hi) hi = h;
+    sum += h;
+  }
+
+  // It must actually move, and by about the 4% asked for - a breath that has
+  // quietly become 0.4% or 40% is a different feature.
+  const float swing = (hi - lo) / (sum / frames);
+  TEST_ASSERT_TRUE(swing > 0.05f);
+  TEST_ASSERT_TRUE(swing < 0.10f);
+
+  // And it must breathe around the intended size, not drift off it. 0.235 is
+  // bounded above by a documented failure: 0.30 ran the cover and its reflection
+  // off the top and bottom of the disc.
+  const float mean = sum / frames;
+  TEST_ASSERT_TRUE(mean > 0.225f);
+  TEST_ASSERT_TRUE(mean < 0.245f);
+}
+
+// ---------------------------------------------------------------------------
 // Backlight
 // ---------------------------------------------------------------------------
 
@@ -2287,6 +2417,9 @@ int main(int, char **) {
   RUN_TEST(test_confirmring_long_name_stays_inside_the_disc);
   RUN_TEST(test_confirmring_handles_a_missing_name);
   RUN_TEST(test_confirmring_drawn_in_bands_matches_full_frame);
+  RUN_TEST(test_coverlight_particles_do_not_wash_out_the_cover);
+  RUN_TEST(test_coverlight_is_bit_exact_across_runs);
+  RUN_TEST(test_coverlight_cover_breathes_over_time);
   RUN_TEST(test_backlight_stays_bright_while_playing);
   RUN_TEST(test_backlight_dims_then_sleeps_when_idle_and_stopped);
   RUN_TEST(test_backlight_input_wakes_it_and_reports_the_wake);

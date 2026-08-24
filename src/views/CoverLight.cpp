@@ -273,7 +273,32 @@ void CoverLight::update(const audio::Modulation &m, float dt, core::Rng &rng) {
   // 0.30 and the cover plus its reflection ran off the top and bottom of the
   // disc - a round screen has far less usable vertical extent than its pixel
   // height suggests, and the reflection doubles whatever the subject occupies.
-  cover_half_ = 0.21f * (1.0f + 0.05f * m.bass);
+  // 0.235 rather than the original 0.21, plus a slow breath.
+  //
+  // The ceiling here is real and was found the hard way: 0.30 put the cover and
+  // its reflection off the top and bottom of the disc, because a round screen
+  // has far less usable vertical extent than its pixel height suggests and the
+  // reflection doubles whatever the subject occupies. 0.235 is about 112px tall,
+  // which is comfortably inside that.
+  //
+  // The breath is a ~18s sine, deliberately far slower than anything in the
+  // music, so it reads as the object being alive rather than as a reaction. It
+  // runs off clock_, which is accumulated dt - never a wall clock, or headless
+  // renders would stop being bit-exact and the pixel tests would go flaky.
+  const float breath = 1.0f + 0.04f * std::sin(clock_ * 0.35f);
+  cover_half_ = 0.235f * (1.0f + 0.05f * m.bass) * breath;
+
+  // Anchor the field to the cover rather than to the middle of the screen.
+  //
+  // The cover hangs above centre so its reflection has somewhere to go, so an
+  // origin at (CX, CY) emitted from below the art and the streaks fanned out
+  // lopsided - more below the cover than above it. Projecting the cover's own
+  // centre through the same transform the quad uses costs one divide a frame and
+  // makes the field genuinely radiate from behind the album.
+  const gfx::Vec3 c = toView(0.0f, 0.0f);
+  parts_.setOrigin(
+      static_cast<float>(gfx::CX) + c.x * gfx::Quad3D::FOCAL / c.z,
+      static_cast<float>(gfx::CY) + c.y * gfx::Quad3D::FOCAL / c.z);
 
   // Advance rings.
   for (int k = 0; k < MAX_RINGS; ++k) {
@@ -384,13 +409,22 @@ void CoverLight::renderBand(gfx::Surface &s) {
   }
   const uint64_t t1 = NOW_US();
 
-  // Pass 2: the cover and its reflection.
-  drawCover(s);
+  // Pass 2: particles, additive, BEHIND the cover.
+  //
+  // They used to be drawn last, on the theory that light in front of the subject
+  // reads better than texture on it. On real artwork it did not: the field is
+  // dense enough at the centre - where it is emitted - that streaks crossed the
+  // face continuously and the album became hard to look at. Occluded by the
+  // cover, the same field reads as light coming from behind it, which is what
+  // the view is called.
+  //
+  // Nothing else changes: the cover is opaque, so the pixels it owns are simply
+  // written after. The pass costs exactly what it did.
+  if (particles_on_) parts_.render(s);
   const uint64_t t15 = NOW_US();
 
-  // Pass 3: particles, additive, on top of everything - so they read as light in
-  // front of the cover rather than as texture on it.
-  if (particles_on_) parts_.render(s);
+  // Pass 3: the cover and its reflection, over the field.
+  drawCover(s);
   const uint64_t t2 = NOW_US();
 
   // Pass 3: bright-pass contribution for next frame's glow. Read-only and
@@ -399,8 +433,8 @@ void CoverLight::renderBand(gfx::Surface &s) {
   const uint64_t t3 = NOW_US();
 
   t_.backdrop += t1 - t0;
-  t_.cover += t15 - t1;
-  t_.particles += t2 - t15;
+  t_.particles += t15 - t1;
+  t_.cover += t2 - t15;
   t_.bloom += t3 - t2;
   ++t_.frames;
 }

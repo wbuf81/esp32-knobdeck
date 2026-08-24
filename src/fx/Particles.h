@@ -44,6 +44,13 @@ class Particles {
   static constexpr int MAX_STEPS = 14;
 
   void configure(const SpawnParams &p) { p_ = p; }
+  // Moves the emission point without re-configuring. Called every frame to keep
+  // the field anchored to the cover, which is why it is two stores rather than a
+  // copy of SpawnParams and its sixteen palette entries.
+  void setOrigin(float x, float y) {
+    p_.x = x;
+    p_.y = y;
+  }
   const SpawnParams &params() const { return p_; }
 
   void emit(int n, core::Rng &rng);
