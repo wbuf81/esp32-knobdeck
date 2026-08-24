@@ -35,6 +35,7 @@
 #include "gfx/Geometry.h"
 #include "gfx/Surface.h"
 #include "input/Gesture.h"
+#include "net/HostLink.h"
 #include "net/NetWorker.h"
 #include "spotify/Library.h"
 #include "platform/esp32/Bench.h"
@@ -101,7 +102,11 @@ core::Backlight g_backlight;
 
 // Set by the host companion when the Mac sleeps or locks. Always false until
 // that exists; wired now so the backlight rule has one place to read it.
-bool g_host_asleep = false;
+net::HostLink g_hostlink;
+
+// The mDNS name the host companion posts to. Kept here rather than in a config
+// file because it is the device's identity, not a preference.
+constexpr const char *MDNS_NAME = "knobspotify";
 
 // Cumulative knob totals, reported in the periodic status line.
 //
@@ -195,6 +200,7 @@ void setup() {
     // No SD card wired up yet, so artwork will report unavailable rather than
     // silently failing - which is the distinction the ancestor's notes insist on.
     LOGF("library: %s", g_library.begin() ? "lists in PSRAM" : "ALLOC FAILED");
+    g_hostlink.configure(MDNS_NAME);
     net.setLibrary(&g_library);
     g_net->start("/sd/art", g_cfg.wifi_ssid.c_str(), g_cfg.wifi_password.c_str());
     LOGF("net: worker started on core 0");
@@ -298,7 +304,20 @@ void loop() {
   const input::Gesture g = g_gesture.update(touching, tx, ty, now);
   if (g != input::Gesture::None || detents != 0) g_last_input_ms = now;
 
-  g_backlight.update(now, st.pb.is_playing, g_last_input_ms, g_host_asleep);
+  g_hostlink.poll(now, st.link == LinkStatus::Online);
+  const bool host_asleep = g_hostlink.hostAsleep(now);
+  {
+    // Logged on change only, so the reason the screen went dark is in the log
+    // without the log being mostly this.
+    static int last = -1;
+    const int nowv = host_asleep ? 1 : 0;
+    if (nowv != last) {
+      last = nowv;
+      LOGF("host: %s (heartbeat %s)", host_asleep ? "asleep/locked" : "awake",
+           g_hostlink.everHeard() ? "seen" : "never seen");
+    }
+  }
+  g_backlight.update(now, st.pb.is_playing, g_last_input_ms, host_asleep);
   esp32::panelBacklight(g_backlight.duty());
 
   // Drift back to the player after a spell of nothing.

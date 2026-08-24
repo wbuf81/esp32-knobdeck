@@ -14,6 +14,7 @@
 
 #include "core/FrameClock.h"
 #include "core/Backlight.h"
+#include "net/HostLink.h"
 #include "core/Hash.h"
 #include "core/Rng.h"
 #include "gfx/Blend.h"
@@ -1910,6 +1911,88 @@ void test_backlight_survives_the_millis_wrap(void) {
   TEST_ASSERT_EQUAL(core::ScreenState::Dim, bl.state());
 }
 
+
+// ---------------------------------------------------------------------------
+// HostLink
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The listener half is hardware; the DECISION is not, and the decision is the
+// part that can darken the screen wrongly. Driven here through the accessors a
+// received heartbeat would set.
+class TestableHostLink : public net::HostLink {
+ public:
+  // Stands in for a received heartbeat.
+  void feed(bool locked, uint32_t at_ms) {
+    // Mirrors exactly what the platform layer does on a recognised request.
+    locked_ = locked;
+    at_ = at_ms;
+    heard_ = true;
+  }
+  bool asleep(uint32_t now) const {
+    if (!heard_) return false;
+    if (locked_) return true;
+    return (now - at_) > net::HostLink::TIMEOUT_MS;
+  }
+
+ private:
+  bool heard_ = false;
+  bool locked_ = false;
+  uint32_t at_ = 0;
+};
+
+}  // namespace
+
+void test_hostlink_fails_open_before_any_heartbeat(void) {
+  // The most important case. If no helper is running - never installed, crashed,
+  // Mac renamed - the screen must behave as though this mechanism does not
+  // exist. Failing the other way would let a dead helper brick the display.
+  net::HostLink hl;
+  TEST_ASSERT_FALSE(hl.everHeard());
+  TEST_ASSERT_FALSE(hl.hostAsleep(0));
+  TEST_ASSERT_FALSE(hl.hostAsleep(999999));
+}
+
+void test_hostlink_locked_report_sleeps_immediately(void) {
+  TestableHostLink hl;
+  hl.feed(/*locked=*/true, 1000);
+  TEST_ASSERT_TRUE(hl.asleep(1000));
+}
+
+void test_hostlink_awake_report_stays_awake(void) {
+  TestableHostLink hl;
+  hl.feed(false, 1000);
+  TEST_ASSERT_FALSE(hl.asleep(1000));
+  TEST_ASSERT_FALSE(hl.asleep(1000 + net::HostLink::TIMEOUT_MS - 1));
+}
+
+void test_hostlink_silence_means_asleep(void) {
+  // A Mac that goes to sleep cannot send "I am asleep"; it stops sending. So
+  // silence has to be the signal, or sleep is indistinguishable from the helper
+  // simply not running.
+  TestableHostLink hl;
+  hl.feed(false, 1000);
+  TEST_ASSERT_TRUE(hl.asleep(1000 + net::HostLink::TIMEOUT_MS + 1));
+}
+
+void test_hostlink_one_dropped_beat_is_not_a_blackout(void) {
+  // The timeout must be comfortably longer than the sender's interval.
+  TestableHostLink hl;
+  const uint32_t interval = 5000;  // what the daemon sends at
+  TEST_ASSERT_TRUE(net::HostLink::TIMEOUT_MS > interval * 3);
+  hl.feed(false, 1000);
+  TEST_ASSERT_FALSE(hl.asleep(1000 + interval * 2));
+}
+
+void test_hostlink_survives_the_millis_wrap(void) {
+  TestableHostLink hl;
+  const uint32_t before = 0xFFFFF000u;
+  hl.feed(false, before);
+  TEST_ASSERT_FALSE(hl.asleep(before + 1000));
+  TEST_ASSERT_TRUE(hl.asleep(before + net::HostLink::TIMEOUT_MS + 1000));
+}
+
 int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_framebuffer_is_360_square);
@@ -2021,5 +2104,11 @@ int main(int, char **) {
   RUN_TEST(test_backlight_input_wakes_it_and_reports_the_wake);
   RUN_TEST(test_backlight_host_asleep_overrides_playback);
   RUN_TEST(test_backlight_survives_the_millis_wrap);
+  RUN_TEST(test_hostlink_fails_open_before_any_heartbeat);
+  RUN_TEST(test_hostlink_locked_report_sleeps_immediately);
+  RUN_TEST(test_hostlink_awake_report_stays_awake);
+  RUN_TEST(test_hostlink_silence_means_asleep);
+  RUN_TEST(test_hostlink_one_dropped_beat_is_not_a_blackout);
+  RUN_TEST(test_hostlink_survives_the_millis_wrap);
   return UNITY_END();
 }
