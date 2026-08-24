@@ -18,6 +18,7 @@
 #include "core/Rng.h"
 #include "art/Image.h"
 #include "fx/Particles.h"
+#include "fx/Matrix.h"
 #include "fx/Outrun.h"
 #include "fx/Tetris.h"
 #include "fx/Themes.h"
@@ -141,6 +142,7 @@ class CoverLight {
   // theme change - which would mean allocating on a fragmenting heap mid-track.
   fx::Tetris tetris_;
   fx::Outrun outrun_;
+  fx::Matrix matrix_;
   gfx::BloomBand bloom_;
 
   // The radial gradient, packed RGB565.

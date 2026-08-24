@@ -26,6 +26,7 @@ enum class ThemeId : uint8_t {
   Rain,
   Tetris,
   Outrun,
+  Matrix,
   Count,
 };
 

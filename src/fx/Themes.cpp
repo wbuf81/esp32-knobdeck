@@ -11,6 +11,7 @@ const char *themeName(ThemeId id) {
     case ThemeId::Rain: return "Rain";
     case ThemeId::Tetris: return "Tetris";
     case ThemeId::Outrun: return "Outrun";
+    case ThemeId::Matrix: return "Matrix";
     case ThemeId::Count: break;
   }
   return "?";
@@ -104,6 +105,20 @@ void themeSpawn(ThemeId id, const uint16_t palette[16], SpawnParams *out) {
       p.gravity_y = -34.0f;
       break;
 
+    case ThemeId::Matrix:
+      // Almost nothing. The columns are the effect, and a particle field over
+      // falling text is just noise on top of text.
+      p.spread = 120.0f;
+      p.speed_min = 6.0f;
+      p.speed_max = 26.0f;
+      p.life_min = 1.0f;
+      p.life_max = 2.4f;
+      p.size_min = 1.0f;
+      p.size_max = 1.4f;
+      p.drag = 0.80f;
+      p.gravity_y = 40.0f;
+      break;
+
     case ThemeId::Count:
       break;
   }
@@ -135,6 +150,9 @@ int themeEmit(ThemeId id, const audio::Modulation &m, float dt, bool ambient,
       break;
     case ThemeId::Outrun:
       rate = 22.0f + 30.0f * m.loudness;
+      break;
+    case ThemeId::Matrix:
+      rate = 5.0f + 8.0f * m.loudness;
       break;
     case ThemeId::Count:
       break;
@@ -168,6 +186,11 @@ int themeBurst(ThemeId id, const audio::Modulation &m, bool ambient) {
     case ThemeId::Outrun:
       n = 30.0f + 50.0f * m.bass;
       break;
+    case ThemeId::Matrix:
+      // The beat scrambles every glyph at once instead. A burst as well would
+      // be the same event said twice, which is the mistake Heartbeat was.
+      n = 0.0f;
+      break;
     case ThemeId::Count:
       break;
   }
@@ -176,7 +199,9 @@ int themeBurst(ThemeId id, const audio::Modulation &m, bool ambient) {
 
 bool themeDoublePulse(ThemeId id) { return id == ThemeId::Heartbeat; }
 
-bool themeOwnsBackdrop(ThemeId id) { return id == ThemeId::Outrun; }
+bool themeOwnsBackdrop(ThemeId id) {
+  return id == ThemeId::Outrun || id == ThemeId::Matrix;
+}
 
 float themeDubDelay(ThemeId id) {
   return id == ThemeId::Heartbeat ? 0.17f : 0.0f;
@@ -203,6 +228,7 @@ float themeRingScale(ThemeId id) {
     // No ring: the backdrop is opaque and painted last-to-first per row, so a
     // shockwave baked into the radial table would simply not be visible.
     case ThemeId::Outrun: return 0.0f;
+    case ThemeId::Matrix: return 0.0f;
     case ThemeId::Count: break;
   }
   return 1.0f;

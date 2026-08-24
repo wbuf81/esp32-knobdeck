@@ -30,6 +30,7 @@
 #include "audio/Procedural.h"
 #include "fx/Particles.h"
 #include "fx/ThemePicker.h"
+#include "fx/Matrix.h"
 #include "fx/Outrun.h"
 #include "fx/Tetris.h"
 #include "fx/Themes.h"
@@ -2886,11 +2887,138 @@ void test_outrun_phase_never_runs_away(void) {
   TEST_ASSERT_TRUE(lit > gfx::W * gfx::H / 2);
 }
 
-void test_outrun_is_the_only_theme_that_owns_the_backdrop(void) {
-  // The gate that keeps the two full-screen passes from ever both running.
+void test_outrun_owns_the_backdrop_and_particle_themes_do_not(void) {
+  // The gate that keeps a themed backdrop and the radial gradient from ever
+  // both running over the same pixels.
   TEST_ASSERT_TRUE(fx::themeOwnsBackdrop(fx::ThemeId::Outrun));
   TEST_ASSERT_FALSE(fx::themeOwnsBackdrop(fx::ThemeId::CoverLight));
   TEST_ASSERT_FALSE(fx::themeOwnsBackdrop(fx::ThemeId::Tetris));
+}
+
+
+// ---------------------------------------------------------------------------
+// Matrix
+// ---------------------------------------------------------------------------
+
+namespace {
+
+uint32_t matrixHash(const gfx::Framebuffer &fb) {
+  uint32_t h = 2166136261u;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x) h = (h ^ fb.at(x, y)) * 16777619u;
+  return h;
+}
+
+}  // namespace
+
+void test_matrix_owns_every_pixel(void) {
+  gfx::Framebuffer fb;
+  fb.fill(0xF800);  // red: any survivor is unmissable
+  fx::Matrix mx;
+  core::Rng rng(0x5A5A);
+  mx.begin(rng);
+  audio::Modulation m;
+  mx.update(m, 1.0f / 30.0f, rng);
+  gfx::Surface s = fullSurface(fb);
+  mx.drawBand(s);
+  int leftover = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (fb.at(x, y) == 0xF800) ++leftover;
+  TEST_ASSERT_EQUAL_INT(0, leftover);
+}
+
+void test_matrix_draws_columns_of_glyphs(void) {
+  // The first fill is scattered across the screen, not stacked above it - the
+  // bug Tetris had, where the theme showed an empty disc for seconds.
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  fx::Matrix mx;
+  core::Rng rng(0x1234);
+  mx.begin(rng);
+  gfx::Surface s = fullSurface(fb);
+  mx.drawBand(s);
+  int lit = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (fb.at(x, y) != 0) ++lit;
+  TEST_ASSERT_TRUE(lit > 500);
+}
+
+void test_matrix_drawn_in_bands_matches_full_frame(void) {
+  gfx::Framebuffer whole, banded;
+  whole.fill(0x0000);
+  banded.fill(0x0000);
+  fx::Matrix a, b;
+  core::Rng ra(0x77), rb(0x77);
+  a.begin(ra);
+  b.begin(rb);
+  audio::Modulation m;
+  m.loudness = 0.5f;
+  for (int f = 0; f < 14; ++f) {
+    m.onset = (f % 5) == 0;
+    a.update(m, 1.0f / 30.0f, ra);
+    b.update(m, 1.0f / 30.0f, rb);
+  }
+  gfx::Surface s = fullSurface(whole);
+  a.drawBand(s);
+  for (int y = 0; y < gfx::H; y += 20) {
+    gfx::Surface bs;
+    bs.px = banded.pixels() + static_cast<size_t>(y) * gfx::W;
+    bs.w = gfx::W;
+    bs.h = 20;
+    bs.y0 = y;
+    b.drawBand(bs);
+  }
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (whole.at(x, y) != banded.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+void test_matrix_columns_fall(void) {
+  auto at = [](int frames) {
+    fx::Matrix mx;
+    core::Rng rng(0x2468);
+    mx.begin(rng);
+    audio::Modulation m;
+    m.loudness = 0.6f;
+    for (int f = 0; f < frames; ++f) mx.update(m, 1.0f / 30.0f, rng);
+    gfx::Framebuffer fb;
+    fb.fill(0x0000);
+    gfx::Surface s = fullSurface(fb);
+    mx.drawBand(s);
+    return matrixHash(fb);
+  };
+  TEST_ASSERT_TRUE(at(1) != at(20));
+}
+
+void test_matrix_beat_scrambles_the_glyphs(void) {
+  // The onset churns every character at once, which is this theme's beat
+  // reaction instead of a burst - the same event said twice was the mistake
+  // Heartbeat was built out of.
+  auto frame = [](bool onset) {
+    fx::Matrix mx;
+    core::Rng rng(0x1010);
+    mx.begin(rng);
+    audio::Modulation m;
+    m.onset = onset;
+    core::Rng r2(0x1010);
+    mx.update(m, 0.0f, r2);  // dt 0: nothing falls, so only churn can differ
+    gfx::Framebuffer fb;
+    fb.fill(0x0000);
+    gfx::Surface s = fullSurface(fb);
+    mx.drawBand(s);
+    return matrixHash(fb);
+  };
+  TEST_ASSERT_TRUE(frame(true) != frame(false));
+}
+
+void test_matrix_and_outrun_both_own_the_backdrop(void) {
+  TEST_ASSERT_TRUE(fx::themeOwnsBackdrop(fx::ThemeId::Matrix));
+  TEST_ASSERT_TRUE(fx::themeOwnsBackdrop(fx::ThemeId::Outrun));
+  TEST_ASSERT_FALSE(fx::themeOwnsBackdrop(fx::ThemeId::Rain));
 }
 
 
@@ -3227,7 +3355,13 @@ int main(int, char **) {
   RUN_TEST(test_outrun_drawn_in_bands_matches_full_frame);
   RUN_TEST(test_outrun_grid_moves_toward_the_viewer);
   RUN_TEST(test_outrun_phase_never_runs_away);
-  RUN_TEST(test_outrun_is_the_only_theme_that_owns_the_backdrop);
+  RUN_TEST(test_outrun_owns_the_backdrop_and_particle_themes_do_not);
+  RUN_TEST(test_matrix_owns_every_pixel);
+  RUN_TEST(test_matrix_draws_columns_of_glyphs);
+  RUN_TEST(test_matrix_drawn_in_bands_matches_full_frame);
+  RUN_TEST(test_matrix_columns_fall);
+  RUN_TEST(test_matrix_beat_scrambles_the_glyphs);
+  RUN_TEST(test_matrix_and_outrun_both_own_the_backdrop);
   RUN_TEST(test_backlight_stays_bright_while_playing);
   RUN_TEST(test_backlight_dims_then_sleeps_when_idle_and_stopped);
   RUN_TEST(test_backlight_input_wakes_it_and_reports_the_wake);

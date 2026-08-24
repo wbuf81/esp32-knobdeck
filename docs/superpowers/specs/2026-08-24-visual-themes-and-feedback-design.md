@@ -1,6 +1,21 @@
 # Visual themes, gesture feedback, and an idle dog
 
-Status: approved 2026-08-24. Split into three sub-projects; each gets its own plan.
+Status: DELIVERED 2026-08-24. All three sub-projects shipped and measured on
+hardware.
+
+Outcome against the budget that shaped the whole design: both backdrop-owning
+themes came in far under the 11.3ms they had to fit, and both made the device
+FASTER than the radial gradient they replace.
+
+| Theme | backdrop | fps |
+|---|---|---|
+| Cover Light (radial) | 11.3 ms | ~19 |
+| Outrun | 2.75 ms | ~23.6 |
+| Matrix | 1.55 ms | ~26.5 |
+
+The lesson worth keeping: a backdrop that is a pure function of the ROW beats a
+per-pixel table lookup, because a row is one computed value and a run of stores.
+The expensive-LOOKING theme was the cheapest one.
 
 ## Why
 
@@ -128,18 +143,21 @@ Shown when playback reports no track. Idles on `sleep`, occasionally `yawn`.
   locked theme survives a track change; the choice round-trips through config.
 - The `KNOB_BANDS=1` assertion holds for every new draw path.
 
-## Sub-project 2: the cheap themes
+## Sub-project 2: the cheap themes — DONE
 
-`Heartbeat`, `Rain`, `Tetris`. All are emission strategies or small block draws,
-none needs the backdrop budget.
+`Heartbeat`, `Rain`, `Tetris`.
+
+Heartbeat needed rebuilding after it shipped: separated from Cover Light only by
+emission numbers, it read as the same effect on real music. Numbers are not a
+mechanism. It now has two the other lacks - a second ring 170ms after the first,
+and the album contracting on the beat.
 
 Tetris: seven tetrominoes x four rotations is a lookup table; pieces fall and
 rotate and are drawn as filled cells, so it costs what the blocks cover.
 
-## Sub-project 3: the expensive themes
+## Sub-project 3: the expensive themes — DONE
 
-`Outrun` and `Matrix`. Both replace the radial backdrop and must come in at or
-under its 11.3 ms. Neither ships until measured against that.
+Both measured on hardware before committing, as required. See the table above.
 
 ## Open
 

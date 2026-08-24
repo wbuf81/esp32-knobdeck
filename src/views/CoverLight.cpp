@@ -107,6 +107,7 @@ void CoverLight::begin(uint32_t track_seed) {
   core::Rng r(track_seed ^ 0x7E7215u);
   tetris_.begin(r);
   outrun_.begin();
+  matrix_.begin(r);
 }
 
 void CoverLight::setTheme(fx::ThemeId id) {
@@ -370,6 +371,7 @@ void CoverLight::update(const audio::Modulation &m, float dt, core::Rng &rng) {
   // Only the theme that shows them pays for them.
   if (theme_ == fx::ThemeId::Tetris) tetris_.update(m, dt, rng);
   if (theme_ == fx::ThemeId::Outrun) outrun_.update(m, dt);
+  if (theme_ == fx::ThemeId::Matrix) matrix_.update(m, dt, rng);
 
   parts_.update(dt);
   buildGradient(m);
@@ -388,7 +390,8 @@ void CoverLight::renderBand(gfx::Surface &s) {
   // every pixel at a measured 11.3ms; drawing a second full-screen layer over it
   // would be the read-and-write-every-pixel pass this renderer refuses to have.
   if (fx::themeOwnsBackdrop(theme_)) {
-    outrun_.drawBand(s, tint_);
+    if (theme_ == fx::ThemeId::Matrix) matrix_.drawBand(s);
+    else outrun_.drawBand(s, tint_);
     const uint64_t tb = NOW_US();
     t_.backdrop += tb - t0;
     // The rest of the frame is unchanged: field, cover, bloom.
