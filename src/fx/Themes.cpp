@@ -62,8 +62,11 @@ void themeSpawn(ThemeId id, const uint16_t palette[16], SpawnParams *out) {
       p.speed_max = 45.0f;
       p.life_min = 1.4f;
       p.life_max = 2.6f;
-      p.size_min = 1.0f;
-      p.size_max = 2.0f;
+      // Fatter than the comet themes. A one-pixel streak reads as noise against
+      // a bright album; rain has to be legible as individual drops, and the
+      // pool has the room - see the rate below.
+      p.size_min = 1.4f;
+      p.size_max = 3.0f;
       p.drag = 0.92f;      // almost none: rain does not decelerate
       p.gravity_y = 260.0f;
       break;
@@ -88,7 +91,11 @@ int themeEmit(ThemeId id, const audio::Modulation &m, float dt, bool ambient,
     case ThemeId::Rain:
       // Steady, and only mildly louder in loud music - rain that thinned out
       // during a quiet passage would read as a bug in the rain.
-      rate = 120.0f + 60.0f * m.loudness;
+      //
+      // 210 with a ~2s life settles at roughly 420 live drops, against the ~800
+      // CoverLight runs at, so this is well inside the particle pass's measured
+      // budget even though it looks like the busier effect.
+      rate = 210.0f + 90.0f * m.loudness;
       break;
     case ThemeId::Count:
       break;
