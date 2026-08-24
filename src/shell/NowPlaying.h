@@ -18,6 +18,7 @@
 #include <cstdint>
 
 #include "core/PlaybackState.h"
+#include "Glyphs.h"
 #include "gfx/Surface.h"
 
 namespace shell {
@@ -30,6 +31,11 @@ class NowPlaying {
   static constexpr int TIME_BASELINE = 308;
   // Inset from the disc edge, so text never runs into the bezel or the ring.
   static constexpr int MARGIN = 30;
+  // Top of the disc, where the browser screens put their heading. Clear of the
+  // cover, clear of the progress ring, and the one place on this screen with
+  // nothing else in it.
+  static constexpr int HEART_CY = 78;
+  static constexpr int HEART_HALF = 13;
 
   // Once per frame, before any band.
   void prepare(const PlaybackState &pb, uint32_t shown_ms);
@@ -48,6 +54,11 @@ class NowPlaying {
   int remaining_x_ = 0;
   bool have_track_ = false;
   bool have_times_ = false;
+  // Saved-state, and whether it is KNOWN. Two flags rather than a tri-state int
+  // because the invariant is worth being blunt about: unknown draws nothing at
+  // all, never an empty heart, which would be a confident claim we cannot make.
+  bool liked_ = false;
+  bool liked_known_ = false;
 };
 
 }  // namespace shell

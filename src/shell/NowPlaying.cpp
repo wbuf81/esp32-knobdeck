@@ -74,6 +74,10 @@ void fitInto(char *dst, size_t cap, const gfx::GFXfont &f, const char *src,
 void NowPlaying::prepare(const PlaybackState &pb, uint32_t shown_ms) {
   have_track_ = pb.has_track;
   have_times_ = false;
+  // Only claim a saved-state for a track that exists. Carrying the last track's
+  // heart across a gap would be a confident answer about the wrong song.
+  liked_known_ = pb.has_track && pb.liked_known;
+  liked_ = pb.liked;
 
   if (!have_track_) {
     // Says so rather than leaving the area blank: a blank strip is
@@ -112,6 +116,15 @@ void NowPlaying::prepare(const PlaybackState &pb, uint32_t shown_ms) {
 void NowPlaying::render(gfx::Surface &s, uint16_t tint) const {
   const uint16_t white = gfx::rgb565(235, 235, 240);
   const uint16_t grey = gfx::rgb565(150, 150, 162);
+
+  // Saved-state. Nothing is drawn while it is unknown - not a hollow heart,
+  // which would read as a confident "no". A filled heart takes the album tint
+  // so it belongs to the artwork; an outline stays grey so the two states differ
+  // in shape as well as in colour, which is what makes them readable at 26px.
+  if (liked_known_) {
+    drawGlyph(s, liked_ ? Glyph::HeartFilled : Glyph::HeartOutline, gfx::CX,
+              HEART_CY, HEART_HALF, liked_ ? tint : grey, 256);
+  }
 
   if (!have_track_) {
     if (title_[0])

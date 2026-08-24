@@ -44,6 +44,7 @@
 #include "platform/esp32/Panel.h"
 #include "platform/esp32/Pins.h"
 #include "shell/ConfirmRing.h"
+#include "shell/GestureFlash.h"
 #include "shell/ListView.h"
 #include "shell/NowPlaying.h"
 #include "shell/RadialShell.h"
@@ -63,6 +64,7 @@ shell::RadialShell g_shell;
 shell::NowPlaying g_nowplaying;
 shell::ListView g_list;
 shell::ConfirmRing g_confirm;
+shell::GestureFlash g_flash;
 spotify::Library g_library;
 
 // Which screen is up.
@@ -377,21 +379,46 @@ void loop() {
             }
             c.type = CommandType::PlayPause;
             send = true;
+            // The glyph shows the state you are NOW IN, not the button you
+            // pressed - the same convention as every transport control.
+            g_flash.show(st.pb.is_playing ? shell::Glyph::Pause
+                                          : shell::Glyph::Play,
+                         now);
             esp32::hapticsClick();
             break;
           case input::Gesture::SwipeLeft:
             c.type = CommandType::Previous;
             send = true;
+            g_flash.show(shell::Glyph::Previous, now);
             esp32::hapticsBump();
             break;
           case input::Gesture::SwipeRight:
             c.type = CommandType::Next;
             send = true;
+            g_flash.show(shell::Glyph::Next, now);
             esp32::hapticsBump();
             break;
           case input::Gesture::LongPress:
+            // Refused, and SAYS SO.
+            //
+            // This used to queue the command anyway, where runCommand dropped it
+            // for having no track id. Two long-presses with nothing playing
+            // therefore looked exactly like a device that had stopped listening.
+            // A refusal the user cannot see is the same as a bug.
+            if (!st.pb.has_track) {
+              g_flash.show(shell::Glyph::HeartSlash, now);
+              if (g_net)
+                g_net->mutate([now](AppState &a) {
+                  a.showToast("Nothing playing", now);
+                });
+              esp32::hapticsBump();
+              break;
+            }
             // Same reason: runCommand picks PUT or DELETE from `liked`, so the
             // local flip has to happen before the command is queued.
+            g_flash.show(st.pb.liked ? shell::Glyph::HeartOutline
+                                     : shell::Glyph::HeartFilled,
+                         now);
             if (g_net) {
               g_net->mutate([](AppState &a) {
                 a.pb.liked = !a.pb.liked;
@@ -410,6 +437,7 @@ void loop() {
             g_sel_pos = 0.0f;
             c.type = CommandType::FetchQueue;
             send = true;
+            g_flash.show(shell::Glyph::ChevronDown, now);
             esp32::hapticsBump();
             break;
           case input::Gesture::SwipeUp:
@@ -421,6 +449,7 @@ void loop() {
             g_sel_pos = 0.0f;
             c.type = CommandType::FetchPlaylists;
             send = true;
+            g_flash.show(shell::Glyph::ChevronUp, now);
             esp32::hapticsBump();
             break;
           default:
@@ -561,6 +590,7 @@ void loop() {
   g_view.update(g_mod, dt, g_rng);
 
   // Measured, truncated and formatted once per frame, not once per band.
+  g_flash.prepare(now);
   if (g_screen == Screen::Player) {
     g_nowplaying.prepare(st.pb, shown_progress);
   } else if (g_screen == Screen::Confirm) {
@@ -617,6 +647,8 @@ void loop() {
       if (g_screen == Screen::Player) g_nowplaying.render(s, g_view.tint());
       else if (g_screen == Screen::Confirm) g_confirm.render(s, g_view.tint());
       else g_list.render(s, g_view.tint());
+      // Last, so the answer is never behind the thing it is answering about.
+      g_flash.render(s, g_view.tint());
       const uint64_t sh2 = esp_timer_get_time();
       g_shell_us += sh1 - sh0;
       g_text_us += sh2 - sh1;

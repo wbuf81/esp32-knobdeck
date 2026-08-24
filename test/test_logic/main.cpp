@@ -33,8 +33,11 @@
 #include "gfx/fonts/Fonts.h"
 #include "input/Gesture.h"
 #include "shell/ConfirmRing.h"
+#include "shell/GestureFlash.h"
+#include "shell/Glyphs.h"
 #include "views/CoverLight.h"
 #include "shell/ListView.h"
+#include "shell/NowPlaying.h"
 #include "shell/RadialShell.h"
 #include "spotify/Library.h"
 #include "gfx/Surface.h"
@@ -2125,6 +2128,211 @@ void test_coverlight_cover_breathes_over_time(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Glyphs and GestureFlash
+//
+// Written against a real complaint: a long-press produced no visible response
+// at all, twice. Once because nothing was playing so the command was correctly
+// dropped, and once because the like toggle worked and NOTHING ON SCREEN READS
+// `liked`. Silence is the bug these cover.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+int litAll(const gfx::Framebuffer &fb) { return litIn(fb, 0, gfx::H); }
+
+int drawOne(gfx::Framebuffer &fb, shell::Glyph g, uint16_t alpha) {
+  fb.fill(0x0000);
+  gfx::Surface s = fullSurface(fb);
+  shell::drawGlyph(s, g, gfx::CX, gfx::CY, 44, 0xFFFF, alpha);
+  return litAll(fb);
+}
+
+}  // namespace
+
+void test_glyphs_every_kind_draws_something(void) {
+  // A glyph that draws nothing is indistinguishable from the silence this
+  // whole feature exists to remove.
+  const shell::Glyph all[] = {
+      shell::Glyph::Play,         shell::Glyph::Pause,
+      shell::Glyph::Next,         shell::Glyph::Previous,
+      shell::Glyph::HeartFilled,  shell::Glyph::HeartOutline,
+      shell::Glyph::HeartSlash,   shell::Glyph::ChevronUp,
+      shell::Glyph::ChevronDown};
+  gfx::Framebuffer fb;
+  for (shell::Glyph g : all) {
+    const int lit = drawOne(fb, g, 256);
+    TEST_ASSERT_TRUE(lit > 80);
+  }
+}
+
+void test_glyphs_are_distinguishable_from_each_other(void) {
+  // Play and pause must not be the same picture - that is the one confusion
+  // that would make the feedback worse than none.
+  gfx::Framebuffer a, b;
+  a.fill(0x0000);
+  b.fill(0x0000);
+  gfx::Surface sa = fullSurface(a);
+  gfx::Surface sb = fullSurface(b);
+  shell::drawGlyph(sa, shell::Glyph::Play, gfx::CX, gfx::CY, 44, 0xFFFF, 256);
+  shell::drawGlyph(sb, shell::Glyph::Pause, gfx::CX, gfx::CY, 44, 0xFFFF, 256);
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (a.at(x, y) != b.at(x, y)) ++diffs;
+  TEST_ASSERT_TRUE(diffs > 200);
+}
+
+void test_glyphs_outline_heart_is_lighter_than_filled(void) {
+  // The two like states have to be told apart at a glance, so the difference
+  // is a hole in the middle rather than a shade.
+  gfx::Framebuffer fb;
+  const int filled = drawOne(fb, shell::Glyph::HeartFilled, 256);
+  const int outline = drawOne(fb, shell::Glyph::HeartOutline, 256);
+  TEST_ASSERT_TRUE(outline > 40);
+  TEST_ASSERT_TRUE(outline < filled / 2);
+}
+
+void test_glyphs_stay_inside_their_box(void) {
+  // Half-extent means half-extent. A glyph that overruns would clip against the
+  // disc rather than against its own bounds, which is invisible until it is not.
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  gfx::Surface s = fullSurface(fb);
+  const int half = 30;
+  shell::drawGlyph(s, shell::Glyph::HeartFilled, gfx::CX, gfx::CY, half, 0xFFFF, 256);
+  int outside = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x) {
+      if (fb.at(x, y) == 0) continue;
+      if (x < gfx::CX - half || x > gfx::CX + half || y < gfx::CY - half ||
+          y > gfx::CY + half)
+        ++outside;
+    }
+  TEST_ASSERT_EQUAL_INT(0, outside);
+}
+
+void test_glyphs_drawn_in_bands_match_full_frame(void) {
+  gfx::Framebuffer whole, banded;
+  whole.fill(0x0000);
+  banded.fill(0x0000);
+  gfx::Surface s = fullSurface(whole);
+  shell::drawGlyph(s, shell::Glyph::HeartFilled, gfx::CX, gfx::CY, 44, 0xF81F, 150);
+  for (int y = 0; y < gfx::H; y += 20) {
+    gfx::Surface b;
+    b.px = banded.pixels() + static_cast<size_t>(y) * gfx::W;
+    b.w = gfx::W;
+    b.h = 20;
+    b.y0 = y;
+    shell::drawGlyph(b, shell::Glyph::HeartFilled, gfx::CX, gfx::CY, 44, 0xF81F, 150);
+  }
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (whole.at(x, y) != banded.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+void test_gestureflash_shows_then_expires(void) {
+  // It must get out of the way on its own. A confirmation that stays is furniture.
+  shell::GestureFlash f;
+  TEST_ASSERT_FALSE(f.visible(0));
+  f.show(shell::Glyph::Play, 1000);
+  TEST_ASSERT_TRUE(f.visible(1000));
+  TEST_ASSERT_TRUE(f.visible(1000 + shell::GestureFlash::HOLD_MS));
+  TEST_ASSERT_FALSE(
+      f.visible(1000 + shell::GestureFlash::HOLD_MS +
+                shell::GestureFlash::FADE_MS + 1));
+}
+
+void test_gestureflash_fades_rather_than_vanishing(void) {
+  // Mid-fade must be dimmer than full strength, not simply gone.
+  gfx::Framebuffer full, half;
+  shell::GestureFlash a, b;
+  a.show(shell::Glyph::HeartFilled, 0);
+  b.show(shell::Glyph::HeartFilled, 0);
+
+  full.fill(0x0000);
+  a.prepare(0);
+  gfx::Surface sf = fullSurface(full);
+  a.render(sf, 0xFFFF);
+
+  half.fill(0x0000);
+  b.prepare(shell::GestureFlash::HOLD_MS + shell::GestureFlash::FADE_MS / 2);
+  gfx::Surface sh = fullSurface(half);
+  b.render(sh, 0xFFFF);
+
+  // Same silhouette, dimmer pixels.
+  int brighter = 0, lit_half = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x) {
+      if (half.at(x, y) != 0) ++lit_half;
+      if (full.at(x, y) > half.at(x, y)) ++brighter;
+    }
+  TEST_ASSERT_TRUE(lit_half > 80);
+  TEST_ASSERT_TRUE(brighter > 80);
+}
+
+void test_gestureflash_survives_the_millis_wrap(void) {
+  // Every timed thing in this project is asserted against the wrap, because the
+  // device is meant to run for months and millis() is 32 bits.
+  shell::GestureFlash f;
+  const uint32_t near_wrap = 0xFFFFFF00u;
+  f.show(shell::Glyph::Pause, near_wrap);
+  TEST_ASSERT_TRUE(f.visible(near_wrap + 10));
+  // 0x100 past near_wrap has wrapped to 0.
+  TEST_ASSERT_FALSE(f.visible(near_wrap + shell::GestureFlash::HOLD_MS +
+                              shell::GestureFlash::FADE_MS + 2));
+}
+
+
+// ---------------------------------------------------------------------------
+// NowPlaying saved-state
+// ---------------------------------------------------------------------------
+
+namespace {
+
+int heartPixels(bool has_track, bool known, bool liked) {
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  PlaybackState pb;
+  pb.has_track = has_track;
+  pb.liked_known = known;
+  pb.liked = liked;
+  shell::NowPlaying np;
+  np.prepare(pb, 0);
+  gfx::Surface s = fullSurface(fb);
+  np.render(s, 0x07FF);
+  // Only the band the heart lives in, so title and artist text cannot be
+  // mistaken for it.
+  const int c = shell::NowPlaying::HEART_CY;
+  const int h = shell::NowPlaying::HEART_HALF;
+  return litIn(fb, c - h - 1, c + h + 2);
+}
+
+}  // namespace
+
+void test_nowplaying_unknown_saved_state_draws_no_heart(void) {
+  // The invariant, stated in CLAUDE.md and until now describing a heart that
+  // did not exist: unknown must render as unknown, never as a confident "no".
+  TEST_ASSERT_EQUAL_INT(0, heartPixels(true, /*known=*/false, false));
+}
+
+void test_nowplaying_draws_both_saved_states_differently(void) {
+  const int filled = heartPixels(true, true, /*liked=*/true);
+  const int outline = heartPixels(true, true, /*liked=*/false);
+  TEST_ASSERT_TRUE(filled > 60);
+  TEST_ASSERT_TRUE(outline > 20);
+  // Shape, not just shade: an outline must be substantially emptier.
+  TEST_ASSERT_TRUE(outline < filled / 2);
+}
+
+void test_nowplaying_no_track_carries_no_heart(void) {
+  // A gap between tracks must not keep showing the last song's answer.
+  TEST_ASSERT_EQUAL_INT(0, heartPixels(false, true, true));
+}
+
+
+// ---------------------------------------------------------------------------
 // Backlight
 // ---------------------------------------------------------------------------
 
@@ -2420,6 +2628,17 @@ int main(int, char **) {
   RUN_TEST(test_coverlight_particles_do_not_wash_out_the_cover);
   RUN_TEST(test_coverlight_is_bit_exact_across_runs);
   RUN_TEST(test_coverlight_cover_breathes_over_time);
+  RUN_TEST(test_glyphs_every_kind_draws_something);
+  RUN_TEST(test_glyphs_are_distinguishable_from_each_other);
+  RUN_TEST(test_glyphs_outline_heart_is_lighter_than_filled);
+  RUN_TEST(test_glyphs_stay_inside_their_box);
+  RUN_TEST(test_glyphs_drawn_in_bands_match_full_frame);
+  RUN_TEST(test_gestureflash_shows_then_expires);
+  RUN_TEST(test_gestureflash_fades_rather_than_vanishing);
+  RUN_TEST(test_gestureflash_survives_the_millis_wrap);
+  RUN_TEST(test_nowplaying_unknown_saved_state_draws_no_heart);
+  RUN_TEST(test_nowplaying_draws_both_saved_states_differently);
+  RUN_TEST(test_nowplaying_no_track_carries_no_heart);
   RUN_TEST(test_backlight_stays_bright_while_playing);
   RUN_TEST(test_backlight_dims_then_sleeps_when_idle_and_stopped);
   RUN_TEST(test_backlight_input_wakes_it_and_reports_the_wake);
