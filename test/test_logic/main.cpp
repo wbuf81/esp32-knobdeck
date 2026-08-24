@@ -30,6 +30,7 @@
 #include "audio/Procedural.h"
 #include "fx/Particles.h"
 #include "fx/ThemePicker.h"
+#include "fx/Tetris.h"
 #include "fx/Themes.h"
 #include "gfx/Quad3D.h"
 #include "gfx/fonts/Fonts.h"
@@ -2577,6 +2578,212 @@ void test_picker_rejects_a_stored_value_from_a_bigger_build(void) {
 
 
 // ---------------------------------------------------------------------------
+// Tetris
+// ---------------------------------------------------------------------------
+
+void test_tetris_every_rotation_has_exactly_four_cells(void) {
+  // A tetromino with three or five cells is not a tetromino. The shape table is
+  // hand-written coordinates, which is readable and exactly the kind of thing a
+  // typo hides in.
+  fx::Tetris t;
+  core::Rng rng(1);
+  t.begin(rng);
+  // Drive every shape through every rotation and assert the drawn cell count
+  // via the pixel budget: 4 cells at CELL^2 pixels, minus nothing, is the only
+  // count a correct piece can produce.
+  const int cell_px = fx::Tetris::CELL * fx::Tetris::CELL;
+  audio::Modulation m;
+  for (int r = 0; r < 4; ++r) {
+    gfx::Framebuffer fb;
+    fb.fill(0x0000);
+    gfx::Surface s = fullSurface(fb);
+    t.drawBand(s);
+    int lit = 0;
+    for (int y = 0; y < gfx::H; ++y)
+      for (int x = 0; x < gfx::W; ++x)
+        if (fb.at(x, y) != 0) ++lit;
+    // Twelve pieces, but some are off-screen at any moment, so this is a
+    // sanity band rather than an exact count.
+    TEST_ASSERT_TRUE(lit > cell_px);
+    TEST_ASSERT_TRUE(lit <= 4 * cell_px * fx::Tetris::MAX);
+    m.onset = true;
+    t.update(m, 1.0f / 30.0f, rng);
+  }
+}
+
+void test_tetris_rotates_on_the_beat_and_not_otherwise(void) {
+  // The quarter-turn landing on the onset is the whole reason this reads as
+  // Tetris rather than as tumbling polygons.
+  auto frameAfter = [](bool onset) {
+    fx::Tetris t;
+    core::Rng rng(0x5150);
+    t.begin(rng);
+    audio::Modulation m;
+    m.onset = onset;
+    core::Rng r2(0x5150);
+    t.update(m, 0.0f, r2);  // dt 0: nothing moves, so only rotation can differ
+    gfx::Framebuffer fb;
+    fb.fill(0x0000);
+    gfx::Surface s = fullSurface(fb);
+    t.drawBand(s);
+    uint32_t h = 2166136261u;
+    for (int y = 0; y < gfx::H; ++y)
+      for (int x = 0; x < gfx::W; ++x) h = (h ^ fb.at(x, y)) * 16777619u;
+    return h;
+  };
+  TEST_ASSERT_TRUE(frameAfter(true) != frameAfter(false));
+}
+
+void test_tetris_pieces_are_recycled_forever(void) {
+  // They fall off the bottom and come back. A piece that stopped being drawn
+  // would thin the effect out to nothing over a long track.
+  fx::Tetris t;
+  core::Rng rng(9);
+  t.begin(rng);
+  audio::Modulation m;
+  m.loudness = 1.0f;
+  for (int f = 0; f < 30 * 120; ++f) t.update(m, 1.0f / 30.0f, rng);
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  gfx::Surface s = fullSurface(fb);
+  t.drawBand(s);
+  int lit = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (fb.at(x, y) != 0) ++lit;
+  TEST_ASSERT_TRUE(lit > 200);
+}
+
+void test_tetris_drawn_in_bands_matches_full_frame(void) {
+  gfx::Framebuffer whole, banded;
+  whole.fill(0x0000);
+  banded.fill(0x0000);
+  fx::Tetris a, b;
+  core::Rng ra(0x2020), rb(0x2020);
+  a.begin(ra);
+  b.begin(rb);
+  audio::Modulation m;
+  m.loudness = 0.5f;
+  for (int f = 0; f < 20; ++f) {
+    m.onset = (f % 7) == 0;
+    a.update(m, 1.0f / 30.0f, ra);
+    b.update(m, 1.0f / 30.0f, rb);
+  }
+  gfx::Surface s = fullSurface(whole);
+  a.drawBand(s);
+  for (int y = 0; y < gfx::H; y += 20) {
+    gfx::Surface bs;
+    bs.px = banded.pixels() + static_cast<size_t>(y) * gfx::W;
+    bs.w = gfx::W;
+    bs.h = 20;
+    bs.y0 = y;
+    b.drawBand(bs);
+  }
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (whole.at(x, y) != banded.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+
+// ---------------------------------------------------------------------------
+// Heartbeat is actually a different effect
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Hashes a rendered frame, so two themes can be compared as pictures rather
+// than as parameter lists.
+uint32_t themeFrameHash(fx::ThemeId id, int frames, const art::Image *cover) {
+  views::CoverLight v;
+  v.begin(0x1177u);
+  v.setTheme(id);
+  v.setCover(cover);
+  core::Rng rng(0x424242u);
+  audio::Modulation m;
+  m.loudness = 0.7f;
+  m.bass = 0.8f;
+  gfx::Framebuffer fb;
+  for (int f = 0; f < frames; ++f) {
+    // A steady 2Hz beat, which is where the two themes used to look alike.
+    m.onset = (f % 15) == 0;
+    m.beat_phase = static_cast<float>(f % 15) / 15.0f;
+    v.update(m, 1.0f / 30.0f, rng);
+    fb.fill(0x0000);
+    gfx::Surface s = fullSurface(fb);
+    v.renderBand(s);
+    v.endFrame();
+  }
+  uint32_t h = 2166136261u;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x) h = (h ^ fb.at(x, y)) * 16777619u;
+  return h;
+}
+
+}  // namespace
+
+void test_heartbeat_contracts_the_cover_and_coverlight_does_not(void) {
+  // The complaint that prompted this: the two themes were separated only by
+  // emission numbers, so on real music - where onsets come thick and fast -
+  // they read as the same effect. The album visibly beating is a MECHANISM the
+  // other theme does not have.
+  art::Image cover;
+  fillCornerTexture(cover);
+
+  auto sizeSwing = [&cover](fx::ThemeId id) {
+    views::CoverLight v;
+    v.begin(0x99u);
+    v.setTheme(id);
+    v.setCover(&cover);
+    core::Rng rng(0x11u);
+    audio::Modulation m;
+    m.bass = 0.0f;  // silence the bass follow so only the thump can move it
+    m.loudness = 0.0f;
+    float lo = 1e9f, hi = -1e9f;
+    // A HALF SECOND around one onset, deliberately short. Over a longer window
+    // the ~18s breath moves both themes by a couple of percent and swamps the
+    // comparison - the first version of this test measured two seconds and
+    // failed for exactly that reason, not because the contraction was missing.
+    for (int f = 0; f < 15; ++f) {
+      m.onset = (f == 2);
+      v.update(m, 1.0f / 30.0f, rng);
+      const float h = v.coverHalf();
+      if (h < lo) lo = h;
+      if (h > hi) hi = h;
+    }
+    return (hi - lo) / hi;
+  };
+
+  const float beat = sizeSwing(fx::ThemeId::Heartbeat);
+  const float cl = sizeSwing(fx::ThemeId::CoverLight);
+  // Heartbeat contracts by most of its 10%; CoverLight cannot move at all here,
+  // because bass and loudness are both zero and half a second of breath is
+  // under one percent.
+  TEST_ASSERT_TRUE(beat > 0.05f);
+  TEST_ASSERT_TRUE(beat > cl * 4.0f);
+}
+
+void test_heartbeat_fires_a_second_ring_after_the_first(void) {
+  // lub-DUB. A single ring per beat is a pulse; two is a heartbeat.
+  TEST_ASSERT_TRUE(fx::themeDoublePulse(fx::ThemeId::Heartbeat));
+  TEST_ASSERT_FALSE(fx::themeDoublePulse(fx::ThemeId::CoverLight));
+  // Fixed, not a fraction of the tempo - a real double-thump does not stretch.
+  TEST_ASSERT_TRUE(fx::themeDubDelay(fx::ThemeId::Heartbeat) > 0.05f);
+  TEST_ASSERT_TRUE(fx::themeDubDelay(fx::ThemeId::Heartbeat) < 0.35f);
+}
+
+void test_heartbeat_and_coverlight_render_differently(void) {
+  // The end-to-end version of the complaint, asserted on pixels.
+  art::Image cover;
+  fillCornerTexture(cover);
+  const uint32_t a = themeFrameHash(fx::ThemeId::CoverLight, 40, &cover);
+  const uint32_t b = themeFrameHash(fx::ThemeId::Heartbeat, 40, &cover);
+  TEST_ASSERT_TRUE(a != b);
+}
+
+
+// ---------------------------------------------------------------------------
 // Backlight
 // ---------------------------------------------------------------------------
 
@@ -2898,6 +3105,13 @@ int main(int, char **) {
   RUN_TEST(test_picker_rows_map_to_the_list);
   RUN_TEST(test_picker_round_trips_through_storage);
   RUN_TEST(test_picker_rejects_a_stored_value_from_a_bigger_build);
+  RUN_TEST(test_tetris_every_rotation_has_exactly_four_cells);
+  RUN_TEST(test_tetris_rotates_on_the_beat_and_not_otherwise);
+  RUN_TEST(test_tetris_pieces_are_recycled_forever);
+  RUN_TEST(test_tetris_drawn_in_bands_matches_full_frame);
+  RUN_TEST(test_heartbeat_contracts_the_cover_and_coverlight_does_not);
+  RUN_TEST(test_heartbeat_fires_a_second_ring_after_the_first);
+  RUN_TEST(test_heartbeat_and_coverlight_render_differently);
   RUN_TEST(test_backlight_stays_bright_while_playing);
   RUN_TEST(test_backlight_dims_then_sleeps_when_idle_and_stopped);
   RUN_TEST(test_backlight_input_wakes_it_and_reports_the_wake);

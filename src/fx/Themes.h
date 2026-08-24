@@ -24,6 +24,7 @@ enum class ThemeId : uint8_t {
   CoverLight = 0,  // the original: comets from behind the album
   Heartbeat,
   Rain,
+  Tetris,
   Count,
 };
 
@@ -48,5 +49,21 @@ int themeBurst(ThemeId id, const audio::Modulation &m, bool ambient);
 // radial backdrop or stay out of it entirely. Rings are baked into a lookup
 // table, so this costs nothing per pixel however hard it is used.
 float themeRingScale(ThemeId id);
+
+// A second, weaker ring a fixed moment after the first: lub-DUB.
+//
+// This is the difference between Heartbeat and CoverLight. They were first
+// separated only by emission numbers - same radial burst, same single ring -
+// and on real music, where onsets come thick and fast, they read as the same
+// effect. A double pulse is a different MECHANISM, and mechanisms are what the
+// eye actually tells apart.
+bool themeDoublePulse(ThemeId id);
+// Seconds between the two beats of that pulse. Short and fixed, not a fraction
+// of the tempo: a real double-thump does not stretch with heart rate.
+float themeDubDelay(ThemeId id);
+
+// How hard the album itself contracts on a beat, as a fraction of its size.
+// 0 leaves the existing gentle bass follow alone.
+float themeCoverPulse(ThemeId id);
 
 }  // namespace fx

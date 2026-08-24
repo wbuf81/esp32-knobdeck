@@ -101,6 +101,11 @@ void CoverLight::begin(uint32_t track_seed) {
   for (int i = 0; i < MAX_RINGS; ++i) rings_[i] = Ring();
   clock_ = 0.0f;
   emit_acc_ = 0.0f;
+
+  // Reseeded per track like everything else derived from the track id, so a
+  // song always looks the same way.
+  core::Rng r(track_seed ^ 0x7E7215u);
+  tetris_.begin(r);
 }
 
 void CoverLight::setTheme(fx::ThemeId id) {
@@ -278,20 +283,11 @@ void CoverLight::update(const audio::Modulation &m, float dt, core::Rng &rng) {
   // 0.30 and the cover plus its reflection ran off the top and bottom of the
   // disc - a round screen has far less usable vertical extent than its pixel
   // height suggests, and the reflection doubles whatever the subject occupies.
-  // 0.235 rather than the original 0.21, plus a slow breath.
-  //
-  // The ceiling here is real and was found the hard way: 0.30 put the cover and
-  // its reflection off the top and bottom of the disc, because a round screen
-  // has far less usable vertical extent than its pixel height suggests and the
-  // reflection doubles whatever the subject occupies. 0.235 is about 112px tall,
-  // which is comfortably inside that.
-  //
-  // The breath is a ~18s sine, deliberately far slower than anything in the
-  // music, so it reads as the object being alive rather than as a reaction. It
-  // runs off clock_, which is accumulated dt - never a wall clock, or headless
-  // renders would stop being bit-exact and the pixel tests would go flaky.
-  const float breath = 1.0f + 0.04f * std::sin(clock_ * 0.35f);
-  cover_half_ = 0.235f * (1.0f + 0.05f * m.bass) * breath;
+  // The release. The attack is in the onset branch below, and the size itself
+  // is computed AFTER it - a contraction that landed a frame after its own beat
+  // is a contraction you can see is late.
+  thump_ -= thump_ * dt * 7.0f;
+  if (thump_ < 0.0f) thump_ = 0.0f;
 
   // Anchor the field to the cover rather than to the middle of the screen.
   //
@@ -322,6 +318,8 @@ void CoverLight::update(const audio::Modulation &m, float dt, core::Rng &rng) {
   }
 
   if (m.onset) {
+    thump_ = 1.0f;
+    if (fx::themeDoublePulse(theme_)) dub_in_ = fx::themeDubDelay(theme_);
     spawnRing(fx::themeRingScale(theme_), m.bass);
     // Comet-fast, so the streaks actually streak. See SpawnParams below.
     const int burst = fx::themeBurst(theme_, m, ambient_);
@@ -329,18 +327,47 @@ void CoverLight::update(const audio::Modulation &m, float dt, core::Rng &rng) {
     half_beat_pending_ = true;
   }
 
+  // The DUB: a weaker ring a fixed moment after the first, which is what makes
+  // a heartbeat a heartbeat rather than a pulse.
+  if (dub_in_ >= 0.0f) {
+    dub_in_ -= dt;
+    if (dub_in_ <= 0.0f) {
+      dub_in_ = -1.0f;
+      thump_ = 0.62f;  // the second contraction, softer than the first
+      spawnRing(0.62f * fx::themeRingScale(theme_), m.bass * 0.8f);
+    }
+  }
+
   // A smaller ring on the half beat. Rings are baked into the radial table, so
   // a second one costs nothing per pixel - which is the only reason it is worth
   // having a train of them rather than one.
+  //
+  // Suppressed for a double-pulse theme: the dub already occupies that gap, and
+  // three rings per beat is a smear rather than a rhythm.
   if (half_beat_pending_ && m.beat_phase > 0.5f) {
     half_beat_pending_ = false;
-    spawnRing(0.5f * fx::themeRingScale(theme_), m.bass * 0.6f);
+    if (!fx::themeDoublePulse(theme_))
+      spawnRing(0.5f * fx::themeRingScale(theme_), m.bass * 0.6f);
   }
 
   // A steady drizzle so the field never empties between beats. Accumulated as a
   // float so the rate is frame-rate independent rather than per-frame.
+  // Now that this frame's thump is known.
+  //
+  // 0.235 rather than the original 0.21, and the ceiling is real: 0.30 ran the
+  // cover and its reflection off the top and bottom of the disc, because a round
+  // screen has far less usable vertical extent than its pixel height suggests.
+  // The breath is a ~18s sine off accumulated dt - never a wall clock, or
+  // headless renders would stop being bit-exact.
+  const float breath = 1.0f + 0.04f * std::sin(clock_ * 0.35f);
+  const float pulse = 1.0f + fx::themeCoverPulse(theme_) * thump_;
+  cover_half_ = 0.235f * (1.0f + 0.05f * m.bass) * breath * pulse;
+
   const int n = fx::themeEmit(theme_, m, dt, ambient_, &emit_acc_);
   if (n > 0) parts_.emit(n, rng);
+
+  // Only the theme that shows them pays for them.
+  if (theme_ == fx::ThemeId::Tetris) tetris_.update(m, dt, rng);
 
   parts_.update(dt);
   buildGradient(m);
@@ -428,6 +455,13 @@ void CoverLight::renderBand(gfx::Surface &s) {
   // Nothing else changes: the cover is opaque, so the pixels it owns are simply
   // written after. The pass costs exactly what it did.
   if (particles_on_) parts_.render(s);
+  // Behind the cover for the same reason the field is: the album is the
+  // subject, and blocks crossing its face would be the wash-out this renderer
+  // just spent a commit fixing.
+  // Drawn in ambient too, unlike the cover. On the THEMES screen the backdrop
+  // IS the preview, and a Tetris row that previewed as an empty disc would be
+  // the one row on the menu that lied about itself.
+  if (theme_ == fx::ThemeId::Tetris) tetris_.drawBand(s);
   const uint64_t t15 = NOW_US();
 
   // Pass 3: the cover and its reflection, over the field.

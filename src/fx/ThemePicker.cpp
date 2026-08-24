@@ -9,6 +9,12 @@ const char *ThemePicker::rowName(int i) {
   return themeName(static_cast<ThemeId>(t));
 }
 
+ThemeId ThemePicker::rowTheme(int i, ThemeId fallback) {
+  const int t = i - 1;
+  if (i <= 0 || t >= static_cast<int>(ThemeId::Count)) return fallback;
+  return static_cast<ThemeId>(t);
+}
+
 void ThemePicker::chooseRow(int row, core::Rng &rng) {
   if (row <= 0) {
     shuffle_ = true;

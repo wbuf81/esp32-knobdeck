@@ -18,6 +18,7 @@
 #include "core/Rng.h"
 #include "art/Image.h"
 #include "fx/Particles.h"
+#include "fx/Tetris.h"
 #include "fx/Themes.h"
 #include "gfx/BloomBand.h"
 #include "gfx/Quad3D.h"
@@ -135,6 +136,9 @@ class CoverLight {
   static constexpr float REFL_EXTENT = 0.85f;
   static constexpr int REFL_SLICES = 4;
   fx::Particles parts_;
+  // ~200 bytes, so it is simply always here rather than being conjured on a
+  // theme change - which would mean allocating on a fragmenting heap mid-track.
+  fx::Tetris tetris_;
   gfx::BloomBand bloom_;
 
   // The radial gradient, packed RGB565.
@@ -161,6 +165,12 @@ class CoverLight {
   float clock_ = 0.0f;
   float emit_acc_ = 0.0f;
   bool half_beat_pending_ = false;
+  // The contraction envelope: jumps to 1 on an onset, then releases. Driven by
+  // dt like everything else here, so headless renders stay bit-exact.
+  float thump_ = 0.0f;
+  // Counts down to the second beat of a double pulse. Negative means none is
+  // pending, which is distinguishable from "due this frame" at zero.
+  float dub_in_ = -1.0f;
   Timing t_;
   bool bloom_locked_ = false;
   bool particles_on_ = true;

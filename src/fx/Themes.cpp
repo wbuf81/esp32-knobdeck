@@ -9,6 +9,7 @@ const char *themeName(ThemeId id) {
     case ThemeId::CoverLight: return "Cover Light";
     case ThemeId::Heartbeat: return "Heartbeat";
     case ThemeId::Rain: return "Rain";
+    case ThemeId::Tetris: return "Tetris";
     case ThemeId::Count: break;
   }
   return "?";
@@ -71,6 +72,22 @@ void themeSpawn(ThemeId id, const uint16_t palette[16], SpawnParams *out) {
       p.gravity_y = 260.0f;
       break;
 
+    case ThemeId::Tetris:
+      // The blocks are the effect. What is left is a faint dust so the disc is
+      // not dead between pieces - slow, tiny, and drifting nowhere in
+      // particular, which is deliberately the opposite of every other theme
+      // here so it never competes with the falling shapes.
+      p.spread = 150.0f;
+      p.speed_min = 4.0f;
+      p.speed_max = 22.0f;
+      p.life_min = 2.0f;
+      p.life_max = 5.0f;
+      p.size_min = 1.0f;
+      p.size_max = 1.6f;
+      p.drag = 0.70f;
+      p.gravity_y = 6.0f;
+      break;
+
     case ThemeId::Count:
       break;
   }
@@ -97,6 +114,9 @@ int themeEmit(ThemeId id, const audio::Modulation &m, float dt, bool ambient,
       // budget even though it looks like the busier effect.
       rate = 210.0f + 90.0f * m.loudness;
       break;
+    case ThemeId::Tetris:
+      rate = 14.0f + 18.0f * m.loudness;
+      break;
     case ThemeId::Count:
       break;
   }
@@ -121,10 +141,28 @@ int themeBurst(ThemeId id, const audio::Modulation &m, bool ambient) {
       // two effects fighting.
       n = 0.0f;
       break;
+    case ThemeId::Tetris:
+      // The beat already turns every piece. Bursting as well would be the same
+      // event said twice.
+      n = 0.0f;
+      break;
     case ThemeId::Count:
       break;
   }
   return static_cast<int>(n * (ambient ? 0.25f : 1.0f));
+}
+
+bool themeDoublePulse(ThemeId id) { return id == ThemeId::Heartbeat; }
+
+float themeDubDelay(ThemeId id) {
+  return id == ThemeId::Heartbeat ? 0.17f : 0.0f;
+}
+
+float themeCoverPulse(ThemeId id) {
+  // The album contracts like a muscle: a sharp jump on the onset, then a slow
+  // release. 10% is large next to the 5% bass follow every theme already has,
+  // which is the point - you should be able to see the thing beat.
+  return id == ThemeId::Heartbeat ? 0.10f : 0.0f;
 }
 
 float themeRingScale(ThemeId id) {
@@ -135,6 +173,9 @@ float themeRingScale(ThemeId id) {
     // nothing per pixel - which is the only reason this theme is affordable.
     case ThemeId::Heartbeat: return 1.7f;
     case ThemeId::Rain: return 0.25f;
+    // No shockwave at all: a ring expanding through a grid of falling blocks
+    // reads as a rendering fault rather than as a pulse.
+    case ThemeId::Tetris: return 0.0f;
     case ThemeId::Count: break;
   }
   return 1.0f;

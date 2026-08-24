@@ -22,6 +22,10 @@ class ThemePicker {
   // What the list shows at row i.
   static const char *rowName(int i);
 
+  // The theme a row would show if picked. Row 0 is Shuffle, which has no theme
+  // of its own, so it previews whatever is running - `fallback`.
+  static ThemeId rowTheme(int i, ThemeId fallback);
+
   void setShuffle() { shuffle_ = true; }
   void lock(ThemeId id) {
     shuffle_ = false;

@@ -531,6 +531,9 @@ void loop() {
           g_sel_pos = 0.0f;
           esp32::hapticsClick();
         } else if (g == input::Gesture::SwipeDown) {
+          // Left without choosing, so the preview is discarded and the
+          // committed theme comes back.
+          g_view.setTheme(g_picker.current());
           g_screen = Screen::Player;
           g_sel = 0;
           g_sel_pos = 0.0f;
@@ -635,6 +638,17 @@ void loop() {
     g_sel_pos += (target - g_sel_pos) * k;
     if (std::fabs(target - g_sel_pos) < 0.002f) g_sel_pos = target;
   }
+  // Live preview: while the THEMES list is up, the backdrop shows whatever row
+  // is highlighted, committed or not.
+  //
+  // Cheaper than it sounds - setTheme() early-returns when the id has not
+  // changed, and it never clears the pool, so scrolling the list crossfades
+  // through the themes instead of restarting each one. Nothing is persisted
+  // until you tap, and swiping away puts the committed theme back.
+  if (g_screen == Screen::Themes) {
+    g_view.setTheme(fx::ThemePicker::rowTheme(g_sel, g_picker.current()));
+  }
+
   g_view.setAmbient(g_screen != Screen::Player);
 
   // Nothing playing, and the player screen is up: the dog has it.
