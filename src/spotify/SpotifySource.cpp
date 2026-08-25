@@ -133,6 +133,12 @@ bool SpotifySource::call(const char *method, const std::string &url,
   if (resp->status == 429) {
     const long wait = resp->retry_after_s > 0 ? resp->retry_after_s : 5;
     rate_limited_.arm(now_ms, static_cast<uint32_t>(wait) * 1000);
+    // LOGGED, which it was not. The only signal used to be a toast, and toasts
+    // rendered nowhere until this project wired them up - so a rate limit was
+    // completely invisible, and a device that had gone deliberately quiet was
+    // indistinguishable from one that was broken. The URL matters too: it says
+    // which call earned the limit.
+    NETLOG("RATE LIMITED %lds by %s", wait, url.c_str());
     out->showToast("Rate limited", now_ms, 3000);
     return false;
   }
@@ -851,8 +857,21 @@ void SpotifySource::step(AppState *out, CommandQueue<> *cmds, uint32_t now_ms) {
   }
 
   if (rate_limited_.armed()) {
-    if (rate_limited_.pending(now_ms)) return;
+    if (rate_limited_.pending(now_ms)) {
+      // Say so periodically. A silent early return here is why a rate-limited
+      // device looks exactly like a hung one: the net task keeps logging
+      // "alive", the UI keeps extrapolating progress to the end of the track,
+      // and nothing anywhere says the requests are being deliberately skipped.
+      static uint32_t last_note = 0;
+      if (now_ms - last_note > 10000) {
+        last_note = now_ms;
+        NETLOG("rate limited: skipping polls, %ums left",
+               (unsigned)rate_limited_.remainingMs(now_ms));
+      }
+      return;
+    }
     rate_limited_.disarm();
+    NETLOG("rate limit expired, polling again");
   }
 
   Command c;
