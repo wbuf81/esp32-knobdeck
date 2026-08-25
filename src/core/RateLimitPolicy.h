@@ -39,4 +39,22 @@ inline uint32_t bootRateLimitWaitMs(int32_t stored_wait_s) {
                                 : static_cast<uint32_t>(ms);
 }
 
+// How often to poll Spotify for playback.
+//
+// The brisk 2s interval exists so a skip made elsewhere reaches the screen
+// quickly. It also means 1800 requests an hour, which is what exhausted the
+// quota - so when the Mac link is fresh and reporting the SAME track playing,
+// the local AppleScript data already covers the gap and the API only needs
+// asking occasionally, for the things it alone knows: playlists, the queue,
+// saved state, device transfer.
+//
+// `mac_agrees` is the caller's judgement, deliberately: it means a FRESH beat,
+// playing, same track. Staleness cannot be decided here because this has no
+// clock, and a helper that stopped talking must not keep the poll stretched -
+// that failure would look exactly like the frozen player that started all this.
+inline uint32_t pollIntervalMs(bool playing, bool mac_agrees) {
+  if (mac_agrees) return 20000;
+  return playing ? 2000 : 5000;
+}
+
 }  // namespace core

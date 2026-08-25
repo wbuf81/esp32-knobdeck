@@ -57,6 +57,13 @@ class SpotifySource {
     setStr(preferred_device_, sizeof(preferred_device_), name ? name : "");
   }
 
+  // See core::pollIntervalMs. Only meaningful when the beat behind it is fresh,
+  // which the UI loop decides.
+  void setMacPlaying(bool playing, const char *uri) {
+    mac_playing_ = playing;
+    setStr(mac_uri_, sizeof(mac_uri_), uri ? uri : "");
+  }
+
   // Poll now rather than waiting out the current interval. Called on wake, so
   // the first frame someone sees is never up to 20s stale.
   void nudge() { next_poll_.disarm(); }
@@ -85,6 +92,8 @@ class SpotifySource {
   std::string last_liked_track_;
   Deadline next_poll_;
   char preferred_device_[64] = {};
+  bool mac_playing_ = false;
+  char mac_uri_[64] = {};
   Deadline rate_limited_;
   // Restored from NVS on the first step(), not in begin(), because that is
   // where now_ms lives. See core/RateLimitPolicy.h for why the stored value is

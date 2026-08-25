@@ -194,6 +194,7 @@ void NetWorker::run() {
       // Copied under the lock the setter uses; step() then runs without it.
       std::lock_guard<std::mutex> lk(mtx_);
       source_.setPreferredDevice(preferred_device_);
+      source_.setMacPlaying(mac_playing_, mac_uri_);
     }
 
     // All network I/O happens here, holding no lock.

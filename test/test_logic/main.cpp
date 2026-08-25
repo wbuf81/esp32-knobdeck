@@ -3477,6 +3477,24 @@ void test_device_pick_prefers_an_already_active_computer(void) {
 // Rate limit policy
 // ---------------------------------------------------------------------------
 
+
+void test_poll_stays_brisk_without_a_mac_link(void) {
+  // No helper, or one that disagrees: the API is still the only thing that
+  // knows what is playing, so keep up with it.
+  TEST_ASSERT_EQUAL_INT(2000, core::pollIntervalMs(true, false));
+}
+
+void test_poll_stretches_when_the_mac_agrees(void) {
+  // The local data covers the gap, so asking Spotify every two seconds buys
+  // nothing but quota. 1800 requests an hour becomes 180.
+  TEST_ASSERT_TRUE(core::pollIntervalMs(true, true) >= 15000);
+}
+
+void test_a_paused_track_does_not_get_the_brisk_interval(void) {
+  // Nothing is moving, so there is nothing to keep up with.
+  TEST_ASSERT_TRUE(core::pollIntervalMs(false, false) > 2000);
+}
+
 void test_a_stored_rate_limit_delays_the_first_poll(void) {
   // The bug this fixes, and it is one I caused: rate_limited_ lives in memory,
   // so every flash cleared it and the device polled Spotify immediately on
@@ -4662,6 +4680,9 @@ int main(int, char **) {
   RUN_TEST(test_device_pick_ignores_a_preferred_name_that_matches_nothing);
   RUN_TEST(test_device_pick_will_not_prefer_a_restricted_named_device);
   RUN_TEST(test_device_pick_with_no_preference_behaves_as_before);
+  RUN_TEST(test_poll_stays_brisk_without_a_mac_link);
+  RUN_TEST(test_poll_stretches_when_the_mac_agrees);
+  RUN_TEST(test_a_paused_track_does_not_get_the_brisk_interval);
   RUN_TEST(test_a_stored_rate_limit_delays_the_first_poll);
   RUN_TEST(test_no_stored_limit_means_poll_immediately);
   RUN_TEST(test_the_boot_wait_is_capped_so_an_expired_limit_is_not_honoured);

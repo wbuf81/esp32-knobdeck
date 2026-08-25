@@ -463,7 +463,15 @@ void loop() {
   // Pushed every frame rather than on change: a 64-byte copy under a mutex the
   // net task already takes, and change-detection here would be more code than
   // the copy it saves.
-  if (g_net) g_net->setPreferredDevice(g_hostlink.mac().state().sp_device);
+  if (g_net) {
+    const net::MacState &ms = g_hostlink.mac().state();
+    // Freshness decided HERE, not in the policy: a beat that stopped arriving
+    // must not keep the poll stretched, or a dead helper would look exactly
+    // like the frozen player this whole thread started with.
+    const bool fresh = ms.valid && !g_hostlink.macStale(now);
+    g_net->setPreferredDevice(ms.sp_device);
+    g_net->setMacPlaying(fresh && ms.sp_playing, fresh ? ms.sp_uri : "");
+  }
   const bool host_asleep = g_hostlink.hostAsleep(now);
   {
     // Logged on change only, so the reason the screen went dark is in the log

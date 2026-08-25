@@ -411,9 +411,24 @@ void SpotifySource::pollPlayer(AppState *out, uint32_t now_ms) {
     }
   }
 
-  next_poll_.arm(now_ms, out->pb.is_playing
-                             ? POLL_PLAYING_MS
-                             : (idle_poll_ ? POLL_ASLEEP_MS : POLL_PAUSED_MS));
+  // The Mac agrees when it reports the same track playing. track_id is the bare
+  // id and mac_uri_ is a full spotify:track: URI, so this is a substring match
+  // rather than equality.
+  const bool mac_agrees = mac_playing_ && out->pb.track_id[0] != '\0' &&
+                          std::strstr(mac_uri_, out->pb.track_id) != nullptr;
+  next_poll_.arm(now_ms,
+                 idle_poll_ ? POLL_ASLEEP_MS
+                            : core::pollIntervalMs(out->pb.is_playing,
+                                                   mac_agrees));
+  if (mac_agrees) {
+    static bool said = false;
+    if (!said) {
+      said = true;
+      NETLOG("mac agrees on the track; polling every %ums instead of %ums",
+             (unsigned)core::pollIntervalMs(true, true),
+             (unsigned)POLL_PLAYING_MS);
+    }
+  }
 }
 
 namespace {

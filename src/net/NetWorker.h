@@ -61,6 +61,15 @@ class NetWorker {
     setStr(preferred_device_, sizeof(preferred_device_), name ? name : "");
   }
 
+  // A FRESH Mac beat reporting this exact track as playing. Freshness is the
+  // caller's job: a helper that stopped talking must not keep the poll
+  // stretched, or a helper crash would look like a frozen player.
+  void setMacPlaying(bool playing, const char *uri) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    mac_playing_ = playing;
+    setStr(mac_uri_, sizeof(mac_uri_), uri ? uri : "");
+  }
+
   // UI side: the decoded cover for an album, or null. Borrowed, not owned, and
   // valid until two further album changes - see art/CoverCache.h.
   const art::Image *cover(const char *album_id) const {
@@ -100,6 +109,8 @@ class NetWorker {
   bool source_started_ = false;
 
   char preferred_device_[64] = {};
+  bool mac_playing_ = false;
+  char mac_uri_[64] = {};
   std::atomic<uint32_t> heartbeat_ms_{0};
   std::atomic<bool> screen_asleep_{false};
   std::atomic<bool> wake_nudge_{false};
