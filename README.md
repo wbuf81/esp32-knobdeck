@@ -180,3 +180,61 @@ another project as-is.
 ## License
 
 MIT.
+
+## The Mac helper (optional)
+
+`HostLink` on the device has always listened for a Mac to report itself; this is
+the sender. It carries host state up — lock state, computer name, system volume,
+and Spotify's own now-playing read locally via AppleScript — and carries a small
+allowlisted command back down, currently just "set the system output volume".
+
+It is entirely optional. Without it the knob is exactly what it was: a Spotify
+player. With it, the knob can turn your Mac's volume, and it stops asking
+Spotify's API what is playing every two seconds — which is what exhausted the
+API quota during development.
+
+**Set it up:**
+
+```sh
+# 1. A shared secret, in two places. Never commit either.
+python3 -c "import secrets; print(secrets.token_urlsafe(24))" > ~/.config/knob-spotify/token
+chmod 600 ~/.config/knob-spotify/token
+#    Then add the SAME value to src/config/secrets.h as:
+#      #define MAC_LINK_TOKEN "..."
+#    and reflash. An empty token disables the command channel entirely.
+
+# 2. Run it in the foreground first. A background process is the wrong place to
+#    discover a typo.
+KNOB_HOST=<device-ip> /usr/bin/python3 tools/mac_link.py
+#    Expected: "starting, host=..." then silence. Silence is correct - a held
+#    request that returns no command produces no output. Turn the knob with
+#    nothing playing and you should see "output volume -> N".
+
+# 3. Install it at login.
+sed -e "s|REPLACE_WITH_ABSOLUTE_PATH|$PWD|" \
+    -e "s|REPLACE_WITH_DEVICE_HOST|<device-ip>|" \
+    tools/com.knobspotify.maclink.plist \
+    > ~/Library/LaunchAgents/com.knobspotify.maclink.plist
+launchctl load ~/Library/LaunchAgents/com.knobspotify.maclink.plist
+tail -f /tmp/knob-maclink.log
+```
+
+**Remove it:**
+
+```sh
+launchctl unload ~/Library/LaunchAgents/com.knobspotify.maclink.plist
+rm ~/Library/LaunchAgents/com.knobspotify.maclink.plist
+```
+
+Killing the helper loses knob-to-Mac control and nothing else. Your volume, your
+mic and your music are untouched — the helper only ever acts when the device
+asks it to, and it asks for one thing.
+
+Measured cost while running: **0.4% CPU, ~25 MB**. It spends almost all its life
+asleep on a socket read the device holds open, which is cheaper than a fast
+heartbeat would be. The first version measured 1.6% because it spawned four or
+five processes a second building the body; the readers are now cached and
+combined.
+
+macOS will likely prompt once for Automation permission so the helper can talk
+to Spotify. That is expected.

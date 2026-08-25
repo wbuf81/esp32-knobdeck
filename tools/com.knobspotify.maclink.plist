@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.knobspotify.maclink</string>
+  <key>ProgramArguments</key>
+  <array>
+    <!-- /usr/bin/python3 deliberately, not a Homebrew python: this must keep
+         working after a brew upgrade removes or moves the interpreter. The
+         helper is stdlib-only for the same reason. -->
+    <string>/usr/bin/python3</string>
+    <string>REPLACE_WITH_ABSOLUTE_PATH/tools/mac_link.py</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- mDNS does not resolve reliably on this network, so the address is
+         pinned. Change it here if the device's DHCP lease moves. -->
+    <key>KNOB_HOST</key>
+    <string>REPLACE_WITH_DEVICE_HOST</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/knob-maclink.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/knob-maclink.log</string>
+</dict>
+</plist>

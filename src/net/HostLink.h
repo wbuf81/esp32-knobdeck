@@ -73,6 +73,9 @@ class HostLink {
   // ONE held client at a time. poll() runs in the render loop, so this is a
   // deadline check across frames, never a wait inside one. A second client
   // arriving while this is held is answered immediately with no command.
+  // Whether a good beat has been announced. Reset by macStale so a helper that
+  // comes back after a gap says so again.
+  bool mac_seen_ = false;
   bool holding_ = false;
   uint32_t hold_until_ms_ = 0;
 

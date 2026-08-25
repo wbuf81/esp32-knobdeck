@@ -2,6 +2,7 @@
 
 namespace net {
 
+
 bool HostLink::hostAsleep(uint32_t now_ms) const {
   // Never heard from: this mechanism is not in use, so it must not darken
   // anything. Failing open is the whole point.

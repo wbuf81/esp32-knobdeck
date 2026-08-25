@@ -391,7 +391,30 @@ void loop() {
     // A turn while she is asleep gets a sniff. Purely additive - the volume
     // edit below still happens, because the knob is still the volume knob.
     if (dog_on_screen) g_dog.react(views::DaisyIdle::Reaction::Turn);
-    if (g_screen == Screen::Player) {
+    // Nothing for Spotify to set, but the Mac can still turn its own volume.
+    // This is the case that used to do nothing at all: a knob turn with no
+    // active device produced a 404 and a ring nobody could see.
+    //
+    // Staleness is checked here, not in MacLink: a helper that stopped talking
+    // must not keep receiving commands, and this branch is where "the Mac is
+    // listening right now" is actually known.
+    const bool mac_volume = !transport &&
+                            g_hostlink.mac().commandChannelEnabled() &&
+                            g_hostlink.mac().state().valid &&
+                            !g_hostlink.macStale(now);
+    if (mac_volume && g_screen == Screen::Player) {
+      if (g_volume < 0) {
+        // Start from the Mac's real level rather than a guess, so the first
+        // detent nudges what you can hear instead of jumping to 50.
+        const int mv = g_hostlink.mac().state().out_vol;
+        g_volume = mv >= 0 ? mv : 50;
+      }
+      g_volume += detents * 2;
+      if (g_volume < 0) g_volume = 0;
+      if (g_volume > 100) g_volume = 100;
+      g_hostlink.mac().requestOutputVolume(g_volume);
+      g_shell.showVolume(g_volume, now);
+    } else if (g_screen == Screen::Player) {
       if (g_volume < 0) g_volume = st.pb.volume_pct >= 0 ? st.pb.volume_pct : 50;
       g_volume += detents * 2;
       if (g_volume < 0) g_volume = 0;

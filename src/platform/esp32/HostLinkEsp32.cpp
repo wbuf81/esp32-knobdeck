@@ -49,6 +49,13 @@ void HostLink::poll(uint32_t now_ms, bool network_up) {
   tryStart(now_ms);
   if (!socket_up_) return;
 
+  // If the helper has gone quiet, forget that we announced it, so its return is
+  // reported rather than silently resumed.
+  if (mac_seen_ && mac_.stale(now_ms)) {
+    mac_seen_ = false;
+    LOGF("maclink: helper went quiet");
+  }
+
   // A held client is checked FIRST and answered the moment a command appears or
   // the hold expires. This is what makes a knob turn feel instant while costing
   // the Mac one sleeping socket read - see MacLink::HOLD_MS for why holding is
@@ -147,6 +154,20 @@ void HostLink::poll(uint32_t now_ms, bool network_up) {
       return;
     }
 
+    // Announced ONCE, and again if it ever comes back after going quiet.
+    // Without this there is no way to tell from the device whether the channel
+    // is working - which is the same blind spot that made a rate limit look
+    // like a hang this afternoon.
+    if (!mac_seen_) {
+      mac_seen_ = true;
+      const MacState &s = mac_.state();
+      LOGF("maclink: beat from '%s' (spotify device '%s') vol=%d locked=%d",
+           s.host, s.sp_device, s.out_vol, s.locked ? 1 : 0);
+      if (s.sp_track[0]) {
+        LOGF("maclink: mac says %s - %s (%d/%d ms)%s", s.sp_artist, s.sp_track,
+             s.sp_pos_ms, s.sp_dur_ms, s.sp_playing ? "" : " [paused]");
+      }
+    }
     ever_heard_ = true;
     last_beat_ms_ = now_ms;
 
