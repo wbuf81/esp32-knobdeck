@@ -124,6 +124,14 @@ input::GestureRecognizer g_gesture;
 // optimistic-UI rule: the settle window in AppState stops an in-flight poll
 // from snapping the number back to what it was before the turn.
 int g_volume = -1;
+// Don't let the Mac's REPORTED volume overwrite a knob turn that has not landed
+// yet. The helper reads out_vol before applying the pending command, so its next
+// beat reports a value one command stale - and resyncing to that made the knob
+// fight itself: turn to 27, resync to 19, turn to 21, resync to 27. The log was
+// unmistakable once it was visible.
+//
+// Same mechanism, same reason as AppState::settle_volume for Spotify.
+Deadline g_mac_vol_settle;
 
 // Idle return from the browser. Long enough to read a list, short enough that
 // walking away leaves the device showing what is playing.
@@ -391,15 +399,23 @@ void loop() {
     // A turn while she is asleep gets a sniff. Purely additive - the volume
     // edit below still happens, because the knob is still the volume knob.
     if (dog_on_screen) g_dog.react(views::DaisyIdle::Reaction::Turn);
-    // Nothing for Spotify to set, but the Mac can still turn its own volume.
-    // This is the case that used to do nothing at all: a knob turn with no
-    // active device produced a 404 and a ring nobody could see.
+    // The knob turns the MAC's output volume whenever the Mac link is live.
+    //
+    // Not gated on Spotify having nothing to control any more: the master
+    // volume of the machine this thing sits beside is what a physical knob next
+    // to a laptop should move. Spotify's own per-device volume is the fallback,
+    // used only when the Mac link is not there - so the knob is never dead.
+    //
+    // The trade, stated plainly: while playing to a phone or a speaker, system
+    // volume does not affect that device. Turning the knob then changes this
+    // Mac's volume rather than the remote player's, which was the old
+    // behaviour. Making it depend on WHERE playback is would be the smarter
+    // rule, but it is not the rule that was asked for.
     //
     // Staleness is checked here, not in MacLink: a helper that stopped talking
     // must not keep receiving commands, and this branch is where "the Mac is
     // listening right now" is actually known.
-    const bool mac_volume = !transport &&
-                            g_hostlink.mac().commandChannelEnabled() &&
+    const bool mac_volume = g_hostlink.mac().commandChannelEnabled() &&
                             g_hostlink.mac().state().valid &&
                             !g_hostlink.macStale(now);
     if (mac_volume && g_screen == Screen::Player) {
@@ -413,6 +429,9 @@ void loop() {
       if (g_volume < 0) g_volume = 0;
       if (g_volume > 100) g_volume = 100;
       g_hostlink.mac().requestOutputVolume(g_volume);
+      // Long enough for the command to reach the Mac and for the NEXT beat to
+      // carry the result back: one hold plus a beat, with room to spare.
+      g_mac_vol_settle.arm(now, 3000);
       g_shell.showVolume(g_volume, now);
     } else if (g_screen == Screen::Player) {
       if (g_volume < 0) g_volume = st.pb.volume_pct >= 0 ? st.pb.volume_pct : 50;
@@ -449,9 +468,23 @@ void loop() {
       if (g_sel < 0) g_sel = 0;
       if (g_sel > n - 1) g_sel = n > 0 ? n - 1 : 0;
     }
-  } else if (g_screen == Screen::Player && st.pb.volume_pct >= 0 &&
-             !g_shell.volumeVisible(now)) {
-    g_volume = st.pb.volume_pct;  // resync once the local edit has settled
+  } else if (g_screen == Screen::Player && !g_shell.volumeVisible(now)) {
+    // Resync from whatever the knob actually drives, once the local edit has
+    // settled. Getting this wrong is not cosmetic: resyncing from Spotify while
+    // the knob moves the Mac would snap g_volume to Spotify's level the moment
+    // the ring hid, so the next detent would jump instead of nudge.
+    const bool mac_owns = g_hostlink.mac().commandChannelEnabled() &&
+                          g_hostlink.mac().state().valid &&
+                          !g_hostlink.macStale(now);
+    if (mac_owns) {
+      // Not while a turn is still in flight, or the stale report wins.
+      if (!g_mac_vol_settle.pending(now) &&
+          g_hostlink.mac().state().out_vol >= 0) {
+        g_volume = g_hostlink.mac().state().out_vol;
+      }
+    } else if (st.pb.volume_pct >= 0) {
+      g_volume = st.pb.volume_pct;
+    }
   }
 
   int tx = 0, ty = 0;
