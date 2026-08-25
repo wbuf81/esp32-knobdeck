@@ -20,6 +20,12 @@ struct DeviceConfig {
   std::string client_id;
   std::string client_secret;
   std::string refresh_token;
+  // Shared secret for the Mac link. EMPTY disables the command channel while
+  // leaving sleep reporting working - an unconfigured device must not ship a
+  // command channel with a blank password. Deliberately NOT part of
+  // complete(): the Mac link is optional, and a device without it is still a
+  // working Spotify player.
+  std::string mac_token;
 
   // Which views rotate: bit i enables full-screen mode i, bit 7 enables the
   // classic view. Set from the portal's checkboxes. All-on by default; an

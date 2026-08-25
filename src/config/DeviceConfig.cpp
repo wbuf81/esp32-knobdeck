@@ -21,12 +21,14 @@ std::string getOr(Preferences &p, const char *key, const char *fallback) {
 
 DeviceConfig DeviceConfig::load() {
   const char *ssid = "", *pass = "", *cid = "", *csec = "", *rtok = "";
+  const char *mtok = "";
 #if defined(HAVE_COMPILED_SECRETS)
   ssid = WIFI_SSID;
   pass = WIFI_PASSWORD;
   cid = SPOTIFY_CLIENT_ID;
   csec = SPOTIFY_CLIENT_SECRET;
   rtok = SPOTIFY_REFRESH_TOKEN;
+  mtok = MAC_LINK_TOKEN;
 #endif
 
   DeviceConfig c;
@@ -37,6 +39,7 @@ DeviceConfig DeviceConfig::load() {
     c.client_id = getOr(p, "cid", cid);
     c.client_secret = getOr(p, "csec", csec);
     c.refresh_token = getOr(p, "rtok", rtok);
+    c.mac_token = getOr(p, "mtok", mtok);
     c.views_mask = p.getUInt("views", 0xFF);
     p.end();
   } else {
@@ -46,6 +49,7 @@ DeviceConfig DeviceConfig::load() {
     c.client_id = cid;
     c.client_secret = csec;
     c.refresh_token = rtok;
+    c.mac_token = mtok;
   }
   return c;
 }
@@ -63,6 +67,7 @@ bool DeviceConfig::save(const DeviceConfig &c) {
     ok &= p.putString("csec", c.client_secret.c_str()) > 0;
   if (!c.refresh_token.empty())
     ok &= p.putString("rtok", c.refresh_token.c_str()) > 0;
+  if (!c.mac_token.empty()) ok &= p.putString("mtok", c.mac_token.c_str()) > 0;
   p.putUInt("views", c.views_mask);
   p.end();
   return ok;
@@ -78,6 +83,7 @@ DeviceConfig DeviceConfig::load() {
   c.client_id = SPOTIFY_CLIENT_ID;
   c.client_secret = SPOTIFY_CLIENT_SECRET;
   c.refresh_token = SPOTIFY_REFRESH_TOKEN;
+  c.mac_token = MAC_LINK_TOKEN;
 #endif
   return c;
 }

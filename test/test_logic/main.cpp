@@ -10,11 +10,13 @@
 
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include <cstdlib>
 
 #include "core/FrameClock.h"
 #include "core/Backlight.h"
 #include "net/HostLink.h"
+#include "net/MacLink.h"
 #include "core/CommandQueue.h"
 #include "core/HeapPolicy.h"
 #include "core/RateLimitPolicy.h"
@@ -3473,6 +3475,197 @@ void test_the_boot_wait_survives_a_garbage_stored_value(void) {
   TEST_ASSERT_EQUAL_INT(0, core::bootRateLimitWaitMs(-99999));
 }
 
+
+// ---------------------------------------------------------------------------
+// Mac link
+// ---------------------------------------------------------------------------
+
+void test_maclink_applies_a_good_beat(void) {
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  const char *body =
+      "v=1\ntok=s3cret\nlocked=0\nhost=Wes's MacBook Pro\n"
+      "sp_device=Wes's MacBook Pro\nout_vol=63\n";
+  TEST_ASSERT_TRUE(ml.applyBeat(body, 1000));
+  TEST_ASSERT_TRUE(ml.state().valid);
+  TEST_ASSERT_FALSE(ml.state().locked);
+  TEST_ASSERT_EQUAL_STRING("Wes's MacBook Pro", ml.state().host);
+  TEST_ASSERT_EQUAL_STRING("Wes's MacBook Pro", ml.state().sp_device);
+  TEST_ASSERT_EQUAL_INT(63, ml.state().out_vol);
+}
+
+void test_maclink_rejects_a_bad_token_and_applies_nothing(void) {
+  // Partial application is the dangerous failure: a rejected beat that still
+  // moved `locked` would let anything on the LAN darken the screen, which is
+  // exactly what the token is for.
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  TEST_ASSERT_TRUE(ml.applyBeat("v=1\ntok=s3cret\nlocked=0\nout_vol=50\n", 1000));
+  TEST_ASSERT_FALSE(ml.applyBeat("v=1\ntok=wrong\nlocked=1\nout_vol=99\n", 2000));
+  TEST_ASSERT_FALSE(ml.state().locked);
+  TEST_ASSERT_EQUAL_INT(50, ml.state().out_vol);
+}
+
+void test_maclink_rejects_a_bad_version(void) {
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  TEST_ASSERT_FALSE(ml.applyBeat("v=2\ntok=s3cret\nlocked=1\n", 1000));
+  TEST_ASSERT_FALSE(ml.state().valid);
+}
+
+void test_maclink_ignores_unknown_keys(void) {
+  // The helper runs at login and firmware changes when it is flashed, so the
+  // two will not move in lockstep. An unknown key must not stop known ones
+  // applying.
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  const char *body =
+      "v=1\ntok=s3cret\nmic_muted=1\nlocked=1\nfuture_thing=whatever\n";
+  TEST_ASSERT_TRUE(ml.applyBeat(body, 1000));
+  TEST_ASSERT_TRUE(ml.state().locked);
+}
+
+void test_maclink_missing_volume_reads_as_unknown(void) {
+  // -1, never 0. A confident zero would draw a full-looking empty slider.
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  TEST_ASSERT_TRUE(ml.applyBeat("v=1\ntok=s3cret\nlocked=0\n", 1000));
+  TEST_ASSERT_EQUAL_INT(-1, ml.state().out_vol);
+}
+
+void test_maclink_empty_token_disables_the_command_channel(void) {
+  // An unconfigured device must not ship a command channel with a blank
+  // password. Sleep state still works; commands do not exist.
+  net::MacLink ml;
+  TEST_ASSERT_FALSE(ml.commandChannelEnabled());
+  ml.requestOutputVolume(42);
+  TEST_ASSERT_FALSE(ml.hasPending());
+  ml.setToken("s3cret");
+  TEST_ASSERT_TRUE(ml.commandChannelEnabled());
+}
+
+void test_maclink_coalesces_volume_requests(void) {
+  // A fast spin sends the final value once, the same coalescing the Spotify
+  // volume command already does.
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  ml.requestOutputVolume(10);
+  ml.requestOutputVolume(20);
+  ml.requestOutputVolume(30);
+  TEST_ASSERT_TRUE(ml.hasPending());
+  char buf[256];
+  const int n = ml.buildResponse(buf, sizeof(buf));
+  TEST_ASSERT_TRUE(n > 0);
+  TEST_ASSERT_TRUE(std::strstr(buf, "set_output_volume=30") != nullptr);
+  TEST_ASSERT_TRUE(std::strstr(buf, "set_output_volume=10") == nullptr);
+}
+
+void test_maclink_clamps_the_volume_argument(void) {
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  char buf[256];
+  ml.requestOutputVolume(500);
+  ml.buildResponse(buf, sizeof(buf));
+  TEST_ASSERT_TRUE(std::strstr(buf, "set_output_volume=100") != nullptr);
+  ml.requestOutputVolume(-9);
+  ml.buildResponse(buf, sizeof(buf));
+  TEST_ASSERT_TRUE(std::strstr(buf, "set_output_volume=0") != nullptr);
+}
+
+void test_maclink_delivers_a_command_once(void) {
+  // buildResponse clears the pending command. Delivering it twice would move
+  // the volume again on the next beat, after the knob had stopped.
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  ml.requestOutputVolume(42);
+  char buf[256];
+  ml.buildResponse(buf, sizeof(buf));
+  TEST_ASSERT_FALSE(ml.hasPending());
+  ml.buildResponse(buf, sizeof(buf));
+  TEST_ASSERT_TRUE(std::strstr(buf, "set_output_volume") == nullptr);
+}
+
+void test_maclink_response_always_carries_version_and_token(void) {
+  // The helper verifies the token comes back, so anything that can answer on
+  // the device's address cannot drive the Mac.
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  char buf[256];
+  const int n = ml.buildResponse(buf, sizeof(buf));
+  TEST_ASSERT_TRUE(n > 0);
+  TEST_ASSERT_TRUE(std::strstr(buf, "v=1") != nullptr);
+  TEST_ASSERT_TRUE(std::strstr(buf, "tok=s3cret") != nullptr);
+}
+
+void test_maclink_goes_stale_and_survives_the_millis_wrap(void) {
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  const uint32_t near_wrap = 0xFFFFFF00u;
+  TEST_ASSERT_TRUE(ml.applyBeat("v=1\ntok=s3cret\nlocked=0\n", near_wrap));
+  TEST_ASSERT_FALSE(ml.stale(near_wrap + 1000));
+  TEST_ASSERT_TRUE(ml.stale(near_wrap + net::MacLink::TIMEOUT_MS + 1000));
+}
+
+void test_maclink_never_heard_is_not_stale(void) {
+  // Fails open, like HostLink::hostAsleep. A mechanism nobody is using must not
+  // change anything.
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  TEST_ASSERT_FALSE(ml.stale(999999));
+  TEST_ASSERT_FALSE(ml.state().valid);
+}
+
+void test_maclink_rejects_an_oversized_body(void) {
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  std::string big = "v=1\ntok=s3cret\nhost=";
+  big.append(net::MacLink::MAX_BODY + 64, 'x');
+  TEST_ASSERT_FALSE(ml.applyBeat(big.c_str(), 1000));
+}
+
+void test_maclink_carries_playback_from_the_mac(void) {
+  // The fields that make the quota problem go away. Values taken from a real
+  // read on the actual machine rather than invented.
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  const char *body =
+      "v=1\ntok=s3cret\nlocked=0\nsp_playing=1\n"
+      "sp_track=hazy concentration\nsp_artist=KAESUL\n"
+      "sp_uri=spotify:track:366l6ir20fMXe2KhBxCbb0\n"
+      "sp_pos_ms=113206\nsp_dur_ms=235690\n";
+  TEST_ASSERT_TRUE(ml.applyBeat(body, 1000));
+  TEST_ASSERT_TRUE(ml.state().sp_playing);
+  TEST_ASSERT_EQUAL_STRING("hazy concentration", ml.state().sp_track);
+  TEST_ASSERT_EQUAL_STRING("KAESUL", ml.state().sp_artist);
+  TEST_ASSERT_EQUAL_STRING("spotify:track:366l6ir20fMXe2KhBxCbb0",
+                           ml.state().sp_uri);
+  TEST_ASSERT_EQUAL_INT(113206, ml.state().sp_pos_ms);
+  TEST_ASSERT_EQUAL_INT(235690, ml.state().sp_dur_ms);
+}
+
+void test_maclink_playback_absent_reads_as_unknown(void) {
+  // A helper too old to send these, or a Mac with Spotify closed. Position and
+  // duration must be -1, not 0: a confident zero would draw a progress ring at
+  // the start of a track that is not playing.
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  TEST_ASSERT_TRUE(ml.applyBeat("v=1\ntok=s3cret\nlocked=0\n", 1000));
+  TEST_ASSERT_FALSE(ml.state().sp_playing);
+  TEST_ASSERT_EQUAL_INT(-1, ml.state().sp_pos_ms);
+  TEST_ASSERT_EQUAL_INT(-1, ml.state().sp_dur_ms);
+  TEST_ASSERT_EQUAL_STRING("", ml.state().sp_track);
+}
+
+void test_maclink_truncates_a_long_name_without_overflowing(void) {
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  std::string body = "v=1\ntok=s3cret\nhost=";
+  body.append(200, 'n');
+  body += "\n";
+  TEST_ASSERT_TRUE(ml.applyBeat(body.c_str(), 1000));
+  TEST_ASSERT_TRUE(std::strlen(ml.state().host) < 64);
+}
+
 // ---------------------------------------------------------------------------
 // Themes and the picker
 // ---------------------------------------------------------------------------
@@ -4428,6 +4621,22 @@ int main(int, char **) {
   RUN_TEST(test_the_boot_wait_is_capped_so_an_expired_limit_is_not_honoured);
   RUN_TEST(test_a_short_stored_limit_is_served_in_full);
   RUN_TEST(test_the_boot_wait_survives_a_garbage_stored_value);
+  RUN_TEST(test_maclink_applies_a_good_beat);
+  RUN_TEST(test_maclink_rejects_a_bad_token_and_applies_nothing);
+  RUN_TEST(test_maclink_rejects_a_bad_version);
+  RUN_TEST(test_maclink_ignores_unknown_keys);
+  RUN_TEST(test_maclink_missing_volume_reads_as_unknown);
+  RUN_TEST(test_maclink_empty_token_disables_the_command_channel);
+  RUN_TEST(test_maclink_coalesces_volume_requests);
+  RUN_TEST(test_maclink_clamps_the_volume_argument);
+  RUN_TEST(test_maclink_delivers_a_command_once);
+  RUN_TEST(test_maclink_response_always_carries_version_and_token);
+  RUN_TEST(test_maclink_goes_stale_and_survives_the_millis_wrap);
+  RUN_TEST(test_maclink_never_heard_is_not_stale);
+  RUN_TEST(test_maclink_rejects_an_oversized_body);
+  RUN_TEST(test_maclink_carries_playback_from_the_mac);
+  RUN_TEST(test_maclink_playback_absent_reads_as_unknown);
+  RUN_TEST(test_maclink_truncates_a_long_name_without_overflowing);
   RUN_TEST(test_every_theme_has_a_name_and_a_distinct_spawn);
   RUN_TEST(test_rain_falls_and_the_others_do_not);
   RUN_TEST(test_rain_does_not_burst_on_the_beat);
