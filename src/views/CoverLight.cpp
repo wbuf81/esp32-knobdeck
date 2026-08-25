@@ -108,6 +108,7 @@ void CoverLight::begin(uint32_t track_seed) {
   tetris_.begin(r);
   outrun_.begin();
   matrix_.begin(r);
+  record_.begin();
 }
 
 void CoverLight::setTheme(fx::ThemeId id) {
@@ -372,6 +373,9 @@ void CoverLight::update(const audio::Modulation &m, float dt, core::Rng &rng) {
   if (theme_ == fx::ThemeId::Tetris) tetris_.update(m, dt, rng);
   if (theme_ == fx::ThemeId::Outrun) outrun_.update(m, dt);
   if (theme_ == fx::ThemeId::Matrix) matrix_.update(m, dt, rng);
+  // No Modulation and no rng: the spin is constant by design, so this theme is
+  // a pure function of accumulated dt.
+  if (theme_ == fx::ThemeId::Record) record_.update(dt);
 
   parts_.update(dt);
   buildGradient(m);
@@ -391,6 +395,7 @@ void CoverLight::renderBand(gfx::Surface &s) {
   // would be the read-and-write-every-pixel pass this renderer refuses to have.
   if (fx::themeOwnsBackdrop(theme_)) {
     if (theme_ == fx::ThemeId::Matrix) matrix_.drawBand(s);
+    else if (theme_ == fx::ThemeId::Record) record_.drawBand(s, cover_, tint_);
     else outrun_.drawBand(s, tint_);
     const uint64_t tb = NOW_US();
     t_.backdrop += tb - t0;
@@ -398,7 +403,10 @@ void CoverLight::renderBand(gfx::Surface &s) {
     if (particles_on_) parts_.render(s);
     const uint64_t tp = NOW_US();
     t_.particles += tp - tb;
-    drawCover(s);
+    // Record draws the art ITSELF, as the disc. Drawing the flat cover over it
+    // as well would be saying the same thing twice, with the second one
+    // covering the first.
+    if (theme_ != fx::ThemeId::Record) drawCover(s);
     const uint64_t tc = NOW_US();
     t_.cover += tc - tp;
     bloom_.accumulateBand(s);

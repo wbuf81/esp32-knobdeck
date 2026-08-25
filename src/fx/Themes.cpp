@@ -12,6 +12,7 @@ const char *themeName(ThemeId id) {
     case ThemeId::Tetris: return "Tetris";
     case ThemeId::Outrun: return "Outrun";
     case ThemeId::Matrix: return "Matrix";
+    case ThemeId::Record: return "Record";
     case ThemeId::Count: break;
   }
   return "?";
@@ -105,6 +106,18 @@ void themeSpawn(ThemeId id, const uint16_t palette[16], SpawnParams *out) {
       p.gravity_y = -34.0f;
       break;
 
+    case ThemeId::Record:
+      // Dust in the light, drifting slowly across the disc. Slower and sparser
+      // even than Matrix: the record IS the picture, and anything with visible
+      // velocity over it reads as dirt on the lens rather than atmosphere.
+      p.spread = 180.0f;
+      p.speed_min = 3.0f;
+      p.speed_max = 14.0f;
+      p.life_min = 2.0f;
+      p.life_max = 5.0f;
+      p.size_min = 1.0f;
+      p.size_max = 1.0f;
+      break;
     case ThemeId::Matrix:
       // Almost nothing. The columns are the effect, and a particle field over
       // falling text is just noise on top of text.
@@ -154,6 +167,11 @@ int themeEmit(ThemeId id, const audio::Modulation &m, float dt, bool ambient,
     case ThemeId::Matrix:
       rate = 5.0f + 8.0f * m.loudness;
       break;
+    case ThemeId::Record:
+      // Barely there, and deliberately not loudness-driven. Dust does not know
+      // what the music is doing.
+      rate = 4.0f;
+      break;
     case ThemeId::Count:
       break;
   }
@@ -191,6 +209,12 @@ int themeBurst(ThemeId id, const audio::Modulation &m, bool ambient) {
       // be the same event said twice, which is the mistake Heartbeat was.
       n = 0.0f;
       break;
+    case ThemeId::Record:
+      // None. The spin is constant by design, so a burst would be the only
+      // thing in the frame reacting to the beat - which draws the eye to the
+      // one element that is not the point.
+      n = 0.0f;
+      break;
     case ThemeId::Count:
       break;
   }
@@ -200,7 +224,8 @@ int themeBurst(ThemeId id, const audio::Modulation &m, bool ambient) {
 bool themeDoublePulse(ThemeId id) { return id == ThemeId::Heartbeat; }
 
 bool themeOwnsBackdrop(ThemeId id) {
-  return id == ThemeId::Outrun || id == ThemeId::Matrix;
+  return id == ThemeId::Outrun || id == ThemeId::Matrix ||
+         id == ThemeId::Record;
 }
 
 float themeDubDelay(ThemeId id) {
@@ -229,6 +254,8 @@ float themeRingScale(ThemeId id) {
     // shockwave baked into the radial table would simply not be visible.
     case ThemeId::Outrun: return 0.0f;
     case ThemeId::Matrix: return 0.0f;
+    // A shockwave leaving a record would fight the grooves it crosses.
+    case ThemeId::Record: return 0.0f;
     case ThemeId::Count: break;
   }
   return 1.0f;

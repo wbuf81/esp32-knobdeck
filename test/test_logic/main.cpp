@@ -34,6 +34,7 @@
 #include "fx/Particles.h"
 #include "fx/ThemePicker.h"
 #include "fx/Matrix.h"
+#include "fx/Record.h"
 #include "fx/Outrun.h"
 #include "fx/Tetris.h"
 #include "fx/Themes.h"
@@ -3196,6 +3197,159 @@ void test_no_gesture_routes_to_nothing(void) {
   TEST_ASSERT_FALSE(a.flip_liked);
 }
 
+
+// ---------------------------------------------------------------------------
+// Record
+// ---------------------------------------------------------------------------
+
+namespace {
+// A cover with a recognisable gradient, so a rotation is detectable rather
+// than merely different.
+void makeTestCover(art::Image *out) {
+  out->allocate(150, 150);
+  for (int y = 0; y < 150; ++y)
+    for (int x = 0; x < 150; ++x)
+      out->set(x, y, gfx::rgb565(static_cast<uint8_t>(x + 40),
+                                 static_cast<uint8_t>(y + 40), 200));
+}
+}  // namespace
+
+void test_record_owns_every_pixel(void) {
+  // It replaces the radial backdrop rather than drawing over one, so a pixel it
+  // fails to write shows the previous frame through - stale garbage on a banded
+  // panel.
+  art::Image cover;
+  makeTestCover(&cover);
+  gfx::Framebuffer fb;
+  fb.fill(0xF81F);
+  fx::Record r;
+  r.begin();
+  r.update(0.1f);
+  gfx::Surface s = fullSurface(fb);
+  r.drawBand(s, &cover, 0x07E0);
+  int leftover = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (fb.at(x, y) == 0xF81F) ++leftover;
+  TEST_ASSERT_EQUAL_INT(0, leftover);
+}
+
+void test_record_drawn_in_bands_matches_full_frame(void) {
+  art::Image cover;
+  makeTestCover(&cover);
+  gfx::Framebuffer whole, banded;
+  whole.fill(0x0000);
+  banded.fill(0x0000);
+  fx::Record a, b;
+  a.begin();
+  b.begin();
+  for (int i = 0; i < 7; ++i) {
+    a.update(1.0f / 30.0f);
+    b.update(1.0f / 30.0f);
+  }
+  gfx::Surface s = fullSurface(whole);
+  a.drawBand(s, &cover, 0x07E0);
+  for (int y = 0; y < gfx::H; y += 20) {
+    gfx::Surface bs;
+    bs.px = banded.pixels() + static_cast<size_t>(y) * gfx::W;
+    bs.w = gfx::W;
+    bs.h = 20;
+    bs.y0 = y;
+    b.drawBand(bs, &cover, 0x07E0);
+  }
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (whole.at(x, y) != banded.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+void test_record_actually_spins(void) {
+  // The point of the theme. A record that does not turn is a circular crop.
+  art::Image cover;
+  makeTestCover(&cover);
+  gfx::Framebuffer early, later;
+  early.fill(0x0000);
+  later.fill(0x0000);
+  fx::Record a, b;
+  a.begin();
+  b.begin();
+  // A sixth of a turn apart at 33 1/3 RPM.
+  for (int i = 0; i < 9; ++i) b.update(1.0f / 30.0f);
+  gfx::Surface sa = fullSurface(early);
+  gfx::Surface sb = fullSurface(later);
+  a.drawBand(sa, &cover, 0x07E0);
+  b.drawBand(sb, &cover, 0x07E0);
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (early.at(x, y) != later.at(x, y)) ++diffs;
+  TEST_ASSERT_TRUE(diffs > 2000);
+}
+
+void test_record_spin_is_frame_rate_independent(void) {
+  // Driven off accumulated dt, not per-frame. One 30-frame run at 1/30 and one
+  // 60-frame run at 1/60 cover the same second and must land on the same angle.
+  fx::Record slow, fast;
+  slow.begin();
+  fast.begin();
+  for (int i = 0; i < 30; ++i) slow.update(1.0f / 30.0f);
+  for (int i = 0; i < 60; ++i) fast.update(1.0f / 60.0f);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, slow.turns(), fast.turns());
+  // And a second of 33 1/3 RPM really is about 5/9 of a turn.
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.5555f, slow.turns());
+}
+
+void test_record_is_bit_exact_across_runs(void) {
+  art::Image cover;
+  makeTestCover(&cover);
+  gfx::Framebuffer a, b;
+  a.fill(0x0000);
+  b.fill(0x0000);
+  fx::Record ra, rb;
+  ra.begin();
+  rb.begin();
+  for (int i = 0; i < 50; ++i) {
+    ra.update(1.0f / 30.0f);
+    rb.update(1.0f / 30.0f);
+  }
+  gfx::Surface sa = fullSurface(a);
+  gfx::Surface sb = fullSurface(b);
+  ra.drawBand(sa, &cover, 0x07E0);
+  rb.drawBand(sb, &cover, 0x07E0);
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (a.at(x, y) != b.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+void test_record_with_no_cover_invents_nothing(void) {
+  // Unknown renders as unknown. A record with no art draws grooves and a label,
+  // never a plausible-looking picture. It must also not crash: cover_ is null
+  // before the first artwork lands on EVERY track change.
+  gfx::Framebuffer fb;
+  fb.fill(0xF81F);
+  fx::Record r;
+  r.begin();
+  r.update(0.2f);
+  gfx::Surface s = fullSurface(fb);
+  r.drawBand(s, nullptr, 0x07E0);
+  int leftover = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (fb.at(x, y) == 0xF81F) ++leftover;
+  TEST_ASSERT_EQUAL_INT(0, leftover);
+}
+
+void test_record_owns_the_backdrop_like_the_other_two(void) {
+  TEST_ASSERT_TRUE(fx::themeOwnsBackdrop(fx::ThemeId::Record));
+}
+
+void test_record_has_a_name(void) {
+  TEST_ASSERT_TRUE(fx::themeName(fx::ThemeId::Record)[0] != '?');
+}
+
 // ---------------------------------------------------------------------------
 // Themes and the picker
 // ---------------------------------------------------------------------------
@@ -4132,6 +4286,14 @@ int main(int, char **) {
   RUN_TEST(test_long_press_with_nothing_listening_gets_zoomies);
   RUN_TEST(test_long_press_with_a_device_but_no_track_still_refuses_visibly);
   RUN_TEST(test_no_gesture_routes_to_nothing);
+  RUN_TEST(test_record_owns_every_pixel);
+  RUN_TEST(test_record_drawn_in_bands_matches_full_frame);
+  RUN_TEST(test_record_actually_spins);
+  RUN_TEST(test_record_spin_is_frame_rate_independent);
+  RUN_TEST(test_record_is_bit_exact_across_runs);
+  RUN_TEST(test_record_with_no_cover_invents_nothing);
+  RUN_TEST(test_record_owns_the_backdrop_like_the_other_two);
+  RUN_TEST(test_record_has_a_name);
   RUN_TEST(test_every_theme_has_a_name_and_a_distinct_spawn);
   RUN_TEST(test_rain_falls_and_the_others_do_not);
   RUN_TEST(test_rain_does_not_burst_on_the_beat);

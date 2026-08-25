@@ -27,6 +27,7 @@ enum class ThemeId : uint8_t {
   Tetris,
   Outrun,
   Matrix,
+  Record,
   Count,
 };
 
