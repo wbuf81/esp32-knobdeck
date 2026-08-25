@@ -873,7 +873,8 @@ void loop() {
     LOGF(
         "fps %5.1f | link %-13s %s %s | %d%% vol | %lu/%lu ms | parts %4d "
         "| back %5.2f cover %5.2f part %5.2f accum %5.2f shell %5.2f "
-        "text %5.2f | heap %lu psram %lu",
+        "text %5.2f | heap %lu psram %lu | bl %s idle %us "
+        "mac v%d l%d s%d ha%d",
         fps, linkName(st.link), st.pb.is_playing ? "play" : "paus",
         st.pb.title[0] ? st.pb.title : "(nothing)", st.pb.volume_pct,
         (unsigned long)shown_progress, (unsigned long)st.pb.duration_ms,
@@ -884,7 +885,18 @@ void loop() {
         vt.frames ? vt.bloom / 1000.0f / vt.frames * 18.0f : 0.0f,
         g_shell_us / 1000.0f / g_frames, g_text_us / 1000.0f / g_frames,
         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+        // On the status line, not on a transition. "It did not sleep" needs the
+        // inputs CONTINUOUSLY: a change-only log says nothing when the answer is
+        // that nothing changed, which is exactly the case being chased.
+        g_backlight.state() == core::ScreenState::Off
+            ? "OFF"
+            : (g_backlight.state() == core::ScreenState::Dim ? "DIM" : "BRT"),
+        (unsigned)((now - g_last_input_ms) / 1000),
+        g_hostlink.mac().state().valid ? 1 : 0,
+        g_hostlink.mac().state().locked ? 1 : 0,
+        g_hostlink.macStale(now) ? 1 : 0,
+        g_hostlink.hostAsleep(now) ? 1 : 0);
     if (g_net && g_net->stalled(now)) LOGF("net: task appears STALLED");
     g_frames = 0;
     g_total_us = 0;
