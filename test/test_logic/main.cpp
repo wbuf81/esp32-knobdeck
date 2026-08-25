@@ -40,6 +40,7 @@
 #include "gfx/Quad3D.h"
 #include "gfx/fonts/Fonts.h"
 #include "input/Gesture.h"
+#include "input/Route.h"
 #include "shell/ConfirmRing.h"
 #include "shell/GestureFlash.h"
 #include "shell/Glyphs.h"
@@ -3059,6 +3060,142 @@ void test_the_heap_floor_leaves_room_for_a_tls_handshake(void) {
   TEST_ASSERT_TRUE(core::HEAP_CLEAR_BYTES > core::HEAP_FLOOR_BYTES);
 }
 
+
+// ---------------------------------------------------------------------------
+// Player gesture routing
+// ---------------------------------------------------------------------------
+
+namespace {
+PlaybackState playingTrack() {
+  PlaybackState pb;
+  pb.has_track = true;
+  pb.has_device = true;
+  pb.is_playing = true;
+  return pb;
+}
+PlaybackState nothingListening() {
+  PlaybackState pb;
+  pb.has_track = false;
+  pb.has_device = false;
+  return pb;
+}
+}  // namespace
+
+void test_tap_with_a_track_sends_playpause_and_flashes(void) {
+  const input::Action a =
+      input::routePlayer(input::Gesture::Tap, playingTrack());
+  TEST_ASSERT_EQUAL(CommandType::PlayPause, a.command);
+  TEST_ASSERT_TRUE(a.show_glyph);
+  TEST_ASSERT_TRUE(a.flip_playing);
+  TEST_ASSERT_EQUAL(input::Screen::Player, a.screen);
+}
+
+void test_tap_with_nothing_listening_is_the_dog_alone(void) {
+  const input::Action a =
+      input::routePlayer(input::Gesture::Tap, nothingListening());
+  TEST_ASSERT_EQUAL(CommandType::None, a.command);
+  TEST_ASSERT_FALSE(a.show_glyph);
+  TEST_ASSERT_FALSE(a.flip_playing);
+  TEST_ASSERT_TRUE(a.poke_dog);
+  TEST_ASSERT_EQUAL(views::DaisyIdle::Reaction::Touch, a.dog);
+}
+
+void test_swipe_down_with_a_track_opens_the_queue(void) {
+  const input::Action a =
+      input::routePlayer(input::Gesture::SwipeDown, playingTrack());
+  TEST_ASSERT_EQUAL(input::Screen::Tracks, a.screen);
+  TEST_ASSERT_EQUAL(CommandType::FetchQueue, a.command);
+}
+
+void test_swipe_down_with_no_track_is_swallowed(void) {
+  // The queue is what comes up AFTER something. With no current track this
+  // jumped to a list that was always empty, and shoved the dog aside to do it.
+  const input::Action a =
+      input::routePlayer(input::Gesture::SwipeDown, nothingListening());
+  TEST_ASSERT_EQUAL(input::Screen::Player, a.screen);
+  TEST_ASSERT_EQUAL(CommandType::None, a.command);
+  TEST_ASSERT_TRUE(a.poke_dog);
+}
+
+void test_swipe_up_always_reaches_playlists(void) {
+  // THE load-bearing assertion of this file. Swipe up is the only route to
+  // Playlists, and Playlists is the only way to start playback or reach THEMES.
+  // Gating it on a track would mean nothing could ever be started - precisely
+  // when nothing is playing. Symmetry with swipe-down would be a bug, and this
+  // test exists so a future tidy-up cannot quietly introduce it.
+  const input::Action with =
+      input::routePlayer(input::Gesture::SwipeUp, playingTrack());
+  const input::Action without =
+      input::routePlayer(input::Gesture::SwipeUp, nothingListening());
+  TEST_ASSERT_EQUAL(input::Screen::Playlists, with.screen);
+  TEST_ASSERT_EQUAL(input::Screen::Playlists, without.screen);
+  TEST_ASSERT_EQUAL(CommandType::FetchPlaylists, without.command);
+}
+
+void test_swipes_with_a_track_skip_and_flash(void) {
+  const input::Action l =
+      input::routePlayer(input::Gesture::SwipeLeft, playingTrack());
+  const input::Action r =
+      input::routePlayer(input::Gesture::SwipeRight, playingTrack());
+  TEST_ASSERT_EQUAL(CommandType::Previous, l.command);
+  TEST_ASSERT_EQUAL(CommandType::Next, r.command);
+  TEST_ASSERT_TRUE(l.show_glyph);
+  TEST_ASSERT_TRUE(r.show_glyph);
+}
+
+void test_swipes_with_nothing_listening_only_wag(void) {
+  const input::Action l =
+      input::routePlayer(input::Gesture::SwipeLeft, nothingListening());
+  TEST_ASSERT_EQUAL(CommandType::None, l.command);
+  TEST_ASSERT_FALSE(l.show_glyph);
+  TEST_ASSERT_TRUE(l.poke_dog);
+  TEST_ASSERT_EQUAL(views::DaisyIdle::Reaction::Swipe, l.dog);
+}
+
+void test_long_press_with_a_track_toggles_like(void) {
+  const input::Action a =
+      input::routePlayer(input::Gesture::LongPress, playingTrack());
+  TEST_ASSERT_EQUAL(CommandType::ToggleLike, a.command);
+  TEST_ASSERT_TRUE(a.show_glyph);
+  TEST_ASSERT_TRUE(a.flip_liked);
+}
+
+void test_long_press_with_nothing_listening_gets_zoomies(void) {
+  // The refusal is still owed - a refusal you cannot see is the same as a bug.
+  // But a crossed-out heart only refuses something SPECIFIC, and with nothing
+  // listening there is no track to have refused, so the glyph goes and the
+  // toast stays.
+  const input::Action a =
+      input::routePlayer(input::Gesture::LongPress, nothingListening());
+  TEST_ASSERT_EQUAL(CommandType::None, a.command);
+  TEST_ASSERT_FALSE(a.show_glyph);
+  TEST_ASSERT_EQUAL(views::DaisyIdle::Reaction::Hold, a.dog);
+  TEST_ASSERT_TRUE(a.toast[0] != '\0');
+}
+
+void test_long_press_with_a_device_but_no_track_still_refuses_visibly(void) {
+  // Spotify open and active with nothing loaded: has_device true, has_track
+  // false. There is still nothing to like, but the transport IS real, so the
+  // crossed-out heart is honest here where it is noise on the dog screen.
+  PlaybackState pb;
+  pb.has_track = false;
+  pb.has_device = true;
+  const input::Action a = input::routePlayer(input::Gesture::LongPress, pb);
+  TEST_ASSERT_EQUAL(CommandType::None, a.command);
+  TEST_ASSERT_TRUE(a.show_glyph);
+  TEST_ASSERT_EQUAL(shell::Glyph::HeartSlash, a.glyph);
+}
+
+void test_no_gesture_routes_to_nothing(void) {
+  const input::Action a =
+      input::routePlayer(input::Gesture::None, playingTrack());
+  TEST_ASSERT_EQUAL(CommandType::None, a.command);
+  TEST_ASSERT_FALSE(a.show_glyph);
+  TEST_ASSERT_FALSE(a.poke_dog);
+  TEST_ASSERT_FALSE(a.flip_playing);
+  TEST_ASSERT_FALSE(a.flip_liked);
+}
+
 // ---------------------------------------------------------------------------
 // Themes and the picker
 // ---------------------------------------------------------------------------
@@ -3984,6 +4121,17 @@ int main(int, char **) {
   RUN_TEST(test_heap_watch_fires_once_on_crossing);
   RUN_TEST(test_heap_watch_rearms_only_after_real_recovery);
   RUN_TEST(test_the_heap_floor_leaves_room_for_a_tls_handshake);
+  RUN_TEST(test_tap_with_a_track_sends_playpause_and_flashes);
+  RUN_TEST(test_tap_with_nothing_listening_is_the_dog_alone);
+  RUN_TEST(test_swipe_down_with_a_track_opens_the_queue);
+  RUN_TEST(test_swipe_down_with_no_track_is_swallowed);
+  RUN_TEST(test_swipe_up_always_reaches_playlists);
+  RUN_TEST(test_swipes_with_a_track_skip_and_flash);
+  RUN_TEST(test_swipes_with_nothing_listening_only_wag);
+  RUN_TEST(test_long_press_with_a_track_toggles_like);
+  RUN_TEST(test_long_press_with_nothing_listening_gets_zoomies);
+  RUN_TEST(test_long_press_with_a_device_but_no_track_still_refuses_visibly);
+  RUN_TEST(test_no_gesture_routes_to_nothing);
   RUN_TEST(test_every_theme_has_a_name_and_a_distinct_spawn);
   RUN_TEST(test_rain_falls_and_the_others_do_not);
   RUN_TEST(test_rain_does_not_burst_on_the_beat);

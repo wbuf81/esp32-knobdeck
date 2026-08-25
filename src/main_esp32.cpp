@@ -35,6 +35,7 @@
 #include "gfx/Geometry.h"
 #include "gfx/Surface.h"
 #include "input/Gesture.h"
+#include "input/Route.h"
 #include "net/HostLink.h"
 #include "net/NetWorker.h"
 #include "spotify/Library.h"
@@ -88,7 +89,9 @@ spotify::Library g_library;
 // Confirm is a leaf off Tracks and nothing else: you can only arrive from a tap
 // on a queue row, and both answers leave immediately. Still flat, still one way
 // between each pair.
-enum class Screen : uint8_t { Player, Playlists, Tracks, Confirm, Themes };
+// Screen moved to input/Route.h so it can be named in routePlayer's signature.
+// Pulled back into this scope so the existing Screen::X sites read unchanged.
+using input::Screen;
 Screen g_screen = Screen::Player;
 
 int g_sel = 0;            // the selected row
@@ -464,139 +467,48 @@ void loop() {
     bool send = false;
 
     switch (g_screen) {
-      case Screen::Player:
-        switch (g) {
-          case input::Gesture::Tap:
-            // Flip is_playing LOCALLY first, then send.
-            //
-            // Not merely for a snappy UI: runCommand chooses between /play and
-            // /pause by reading this field, on the assumption the UI has already
-            // flipped it. Without the flip it sent /play while already playing,
-            // and Spotify answered 403 "restriction violated" - so tapping did
-            // nothing at all and the log said only 403.
-            //
-            // The settle window is what stops a poll already in flight from
-            // snapping the state back before Spotify has caught up.
-            // She lifts her head. With nothing listening this is the whole
-            // response: no glyph promising a transport that is not there, and
-            // no request that could only come back 404.
-            if (dog_on_screen) g_dog.react(views::DaisyIdle::Reaction::Touch);
-            if (!transport) {
-              esp32::hapticsClick();
-              break;
-            }
-            if (g_net) {
-              g_net->mutate([](AppState &a) {
-                a.pb.is_playing = !a.pb.is_playing;
-                a.settle_playing.arm(millis(), 1500);
-              });
-            }
-            c.type = CommandType::PlayPause;
-            send = true;
-            // The glyph shows the state you are NOW IN, not the button you
-            // pressed - the same convention as every transport control.
-            g_flash.show(st.pb.is_playing ? shell::Glyph::Pause
-                                          : shell::Glyph::Play,
-                         now);
-            esp32::hapticsClick();
-            break;
-          case input::Gesture::SwipeLeft:
-            if (dog_on_screen) g_dog.react(views::DaisyIdle::Reaction::Swipe);
-            if (transport) {
-              c.type = CommandType::Previous;
-              send = true;
-              g_flash.show(shell::Glyph::Previous, now);
-            }
-            esp32::hapticsBump();
-            break;
-          case input::Gesture::SwipeRight:
-            if (dog_on_screen) g_dog.react(views::DaisyIdle::Reaction::Swipe);
-            if (transport) {
-              c.type = CommandType::Next;
-              send = true;
-              g_flash.show(shell::Glyph::Next, now);
-            }
-            esp32::hapticsBump();
-            break;
-          case input::Gesture::LongPress:
-            // Refused, and SAYS SO.
-            //
-            // This used to queue the command anyway, where runCommand dropped it
-            // for having no track id. Two long-presses with nothing playing
-            // therefore looked exactly like a device that had stopped listening.
-            // A refusal the user cannot see is the same as a bug.
-            if (!st.pb.has_track) {
-              // The refusal is still owed - a refusal the user cannot see is
-              // the same as a bug, which is why this branch exists at all. But
-              // a crossed-out heart only refuses something SPECIFIC. With
-              // nothing listening there is no track to have refused, so the
-              // zoomies are the honest answer and the glyph would be noise.
-              if (dog_on_screen) g_dog.react(views::DaisyIdle::Reaction::Hold);
-              if (transport) g_flash.show(shell::Glyph::HeartSlash, now);
-              if (g_net)
-                g_net->mutate([now](AppState &a) {
-                  a.showToast("Nothing playing", now);
-                });
-              esp32::hapticsBump();
-              break;
-            }
-            // Same reason: runCommand picks PUT or DELETE from `liked`, so the
-            // local flip has to happen before the command is queued.
-            g_flash.show(st.pb.liked ? shell::Glyph::HeartOutline
-                                     : shell::Glyph::HeartFilled,
-                         now);
-            if (g_net) {
-              g_net->mutate([](AppState &a) {
-                a.pb.liked = !a.pb.liked;
-                a.pb.liked_known = true;
-                a.settle_liked.arm(millis(), 2000);
-              });
-            }
-            c.type = CommandType::ToggleLike;
-            send = true;
-            esp32::hapticsBump();
-            break;
-          case input::Gesture::SwipeDown:
-            // The queue is what is coming up AFTER something. With no current
-            // track there is nothing for it to come after, so this jumped to a
-            // list that was always empty - and did it by shoving the dog off
-            // screen. Inside this case !has_track is exactly "the dog is up".
-            //
-            // Swipe UP is deliberately NOT gated the same way. It is the only
-            // route to Playlists, and Playlists is the only way to start
-            // playback or reach THEMES from the device; gating it on a track
-            // would mean nothing could ever be started, precisely when nothing
-            // is playing.
-            if (!st.pb.has_track) {
-              g_dog.react(views::DaisyIdle::Reaction::Swipe);
-              esp32::hapticsBump();
-              break;
-            }
-            // Straight to what is coming up, without going through the chooser.
-            g_screen = Screen::Tracks;
-            g_sel = 0;
-            g_sel_pos = 0.0f;
-            c.type = CommandType::FetchQueue;
-            send = true;
-            g_flash.show(shell::Glyph::ChevronDown, now);
-            esp32::hapticsBump();
-            break;
-          case input::Gesture::SwipeUp:
-            // Open the browser and ask for the listing. The list appears
-            // immediately and empty rather than after the round trip, so the
-            // gesture feels answered.
-            g_screen = Screen::Playlists;
-            g_sel = 0;
-            g_sel_pos = 0.0f;
-            c.type = CommandType::FetchPlaylists;
-            send = true;
-            g_flash.show(shell::Glyph::ChevronUp, now);
-            esp32::hapticsBump();
-            break;
-          default:
-            break;
+      case Screen::Player: {
+        // The rules used to live here, in device-only code no test could
+        // reach. They are input::routePlayer now, which is why the tricky ones
+        // - transport suppression, and swipe-down swallowed while swipe-up is
+        // NOT - are assertions instead of comments.
+        const input::Action act = input::routePlayer(g, st.pb);
+
+        if (act.poke_dog) g_dog.react(act.dog);
+        if (act.show_glyph) g_flash.show(act.glyph, now);
+        if (act.toast[0] && g_net) {
+          const char *msg = act.toast;
+          g_net->mutate([msg, now](AppState &a) { a.showToast(msg, now); });
         }
+        // Local flips BEFORE the command is queued: runCommand picks /play vs
+        // /pause and PUT vs DELETE by reading these, and getting the order
+        // wrong sent /play while already playing for a 403 nobody could see.
+        if (act.flip_playing && g_net) {
+          g_net->mutate([](AppState &a) {
+            a.pb.is_playing = !a.pb.is_playing;
+            a.settle_playing.arm(millis(), 1500);
+          });
+        }
+        if (act.flip_liked && g_net) {
+          g_net->mutate([](AppState &a) {
+            a.pb.liked = !a.pb.liked;
+            a.pb.liked_known = true;
+            a.settle_liked.arm(millis(), 2000);
+          });
+        }
+        if (act.screen != Screen::Player) {
+          g_screen = act.screen;
+          g_sel = 0;
+          g_sel_pos = 0.0f;
+        }
+        if (act.command != CommandType::None) {
+          c.type = act.command;
+          send = true;
+        }
+        if (act.haptic_bump) esp32::hapticsBump();
+        else if (g != input::Gesture::None) esp32::hapticsClick();
         break;
+      }
 
       case Screen::Playlists:
         if (g == input::Gesture::Tap) {
