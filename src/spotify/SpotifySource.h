@@ -51,6 +51,12 @@ class SpotifySource {
   // Spotify traffic for nothing. Net thread only.
   void setIdlePoll(bool idle) { idle_poll_ = idle; }
 
+  // Which device the wake should prefer: the Mac the knob is sitting next to,
+  // as reported by the Mac link. Empty falls back to pickDevice's own rules.
+  void setPreferredDevice(const char *name) {
+    setStr(preferred_device_, sizeof(preferred_device_), name ? name : "");
+  }
+
   // Poll now rather than waiting out the current interval. Called on wake, so
   // the first frame someone sees is never up to 20s stale.
   void nudge() { next_poll_.disarm(); }
@@ -78,6 +84,7 @@ class SpotifySource {
 
   std::string last_liked_track_;
   Deadline next_poll_;
+  char preferred_device_[64] = {};
   Deadline rate_limited_;
   // Restored from NVS on the first step(), not in begin(), because that is
   // where now_ms lives. See core/RateLimitPolicy.h for why the stored value is

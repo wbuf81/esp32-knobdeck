@@ -437,6 +437,10 @@ void loop() {
   if (g != input::Gesture::None || detents != 0) g_last_input_ms = now;
 
   g_hostlink.poll(now, st.link == LinkStatus::Online);
+  // Pushed every frame rather than on change: a 64-byte copy under a mutex the
+  // net task already takes, and change-detection here would be more code than
+  // the copy it saves.
+  if (g_net) g_net->setPreferredDevice(g_hostlink.mac().state().sp_device);
   const bool host_asleep = g_hostlink.hostAsleep(now);
   {
     // Logged on change only, so the reason the screen went dark is in the log

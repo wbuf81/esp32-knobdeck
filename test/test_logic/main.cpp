@@ -3420,6 +3420,48 @@ void test_device_pick_reports_nothing_usable(void) {
   TEST_ASSERT_EQUAL_INT(-1, spotify::pickDevice(nullptr, 3));
 }
 
+
+void test_device_pick_prefers_the_mac_that_is_here(void) {
+  // The two-Macs fix. Both are Computers and NEITHER is active - which is
+  // exactly the state when the idle screen is showing - so without a name the
+  // picker falls through to Spotify's list order and gets it right half the
+  // time. The live probe found precisely this pair on this account.
+  spotify::DeviceInfo d[2];
+  setStr(d[0].name, sizeof(d[0].name), "SERIAL-1234ABCD-M");
+  setStr(d[0].type, sizeof(d[0].type), "Computer");
+  setStr(d[1].name, sizeof(d[1].name), "Wes's MacBook Pro");
+  setStr(d[1].type, sizeof(d[1].type), "Computer");
+  TEST_ASSERT_EQUAL_INT(1, spotify::pickDevice(d, 2, "Wes's MacBook Pro"));
+}
+
+void test_device_pick_ignores_a_preferred_name_that_matches_nothing(void) {
+  spotify::DeviceInfo d[2];
+  setStr(d[0].name, sizeof(d[0].name), "Kitchen Speaker");
+  setStr(d[0].type, sizeof(d[0].type), "Speaker");
+  setStr(d[1].name, sizeof(d[1].name), "Some Mac");
+  setStr(d[1].type, sizeof(d[1].type), "Computer");
+  TEST_ASSERT_EQUAL_INT(1, spotify::pickDevice(d, 2, "Not Here"));
+}
+
+void test_device_pick_will_not_prefer_a_restricted_named_device(void) {
+  // A name match must not override the one flag that guarantees failure.
+  spotify::DeviceInfo d[2];
+  setStr(d[0].name, sizeof(d[0].name), "Wes's MacBook Pro");
+  setStr(d[0].type, sizeof(d[0].type), "Computer");
+  d[0].is_restricted = true;
+  setStr(d[1].name, sizeof(d[1].name), "Other Mac");
+  setStr(d[1].type, sizeof(d[1].type), "Computer");
+  TEST_ASSERT_EQUAL_INT(1, spotify::pickDevice(d, 2, "Wes's MacBook Pro"));
+}
+
+void test_device_pick_with_no_preference_behaves_as_before(void) {
+  spotify::DeviceInfo d[2];
+  setStr(d[0].type, sizeof(d[0].type), "Smartphone");
+  setStr(d[1].type, sizeof(d[1].type), "Computer");
+  TEST_ASSERT_EQUAL_INT(1, spotify::pickDevice(d, 2, nullptr));
+  TEST_ASSERT_EQUAL_INT(1, spotify::pickDevice(d, 2, ""));
+}
+
 void test_device_pick_prefers_an_already_active_computer(void) {
   // If one is somehow already active, it is the one that will accept a resume
   // without a transfer round trip.
@@ -4616,6 +4658,10 @@ int main(int, char **) {
   RUN_TEST(test_device_pick_falls_back_to_the_first_usable);
   RUN_TEST(test_device_pick_reports_nothing_usable);
   RUN_TEST(test_device_pick_prefers_an_already_active_computer);
+  RUN_TEST(test_device_pick_prefers_the_mac_that_is_here);
+  RUN_TEST(test_device_pick_ignores_a_preferred_name_that_matches_nothing);
+  RUN_TEST(test_device_pick_will_not_prefer_a_restricted_named_device);
+  RUN_TEST(test_device_pick_with_no_preference_behaves_as_before);
   RUN_TEST(test_a_stored_rate_limit_delays_the_first_poll);
   RUN_TEST(test_no_stored_limit_means_poll_immediately);
   RUN_TEST(test_the_boot_wait_is_capped_so_an_expired_limit_is_not_honoured);

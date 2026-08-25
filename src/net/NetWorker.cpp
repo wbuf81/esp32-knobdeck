@@ -190,6 +190,11 @@ void NetWorker::run() {
 
     source_.setIdlePoll(screen_asleep_.load());
     if (wake_nudge_.exchange(false)) source_.nudge();
+    {
+      // Copied under the lock the setter uses; step() then runs without it.
+      std::lock_guard<std::mutex> lk(mtx_);
+      source_.setPreferredDevice(preferred_device_);
+    }
 
     // All network I/O happens here, holding no lock.
     source_.step(&scratch, &local, now);

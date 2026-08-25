@@ -54,6 +54,13 @@ class NetWorker {
   // render task reads them through the library's generation counter.
   void setLibrary(spotify::Library *lib) { source_.setLibrary(lib); }
 
+  // The Spotify device name of the Mac this knob sits beside, from the Mac
+  // link. Empty means unknown, and the picker then falls back to its own rules.
+  void setPreferredDevice(const char *name) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    setStr(preferred_device_, sizeof(preferred_device_), name ? name : "");
+  }
+
   // UI side: the decoded cover for an album, or null. Borrowed, not owned, and
   // valid until two further album changes - see art/CoverCache.h.
   const art::Image *cover(const char *album_id) const {
@@ -92,6 +99,7 @@ class NetWorker {
   const char *password_ = nullptr;
   bool source_started_ = false;
 
+  char preferred_device_[64] = {};
   std::atomic<uint32_t> heartbeat_ms_{0};
   std::atomic<bool> screen_asleep_{false};
   std::atomic<bool> wake_nudge_{false};

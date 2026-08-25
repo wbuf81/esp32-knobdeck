@@ -673,7 +673,7 @@ void SpotifySource::wakeDevice(AppState *out, uint32_t now_ms) {
            found[i].is_restricted ? " RESTRICTED" : "");
   }
 
-  const int pick = spotify::pickDevice(found, n);
+  const int pick = spotify::pickDevice(found, n, preferred_device_);
   if (pick < 0) {
     // The honest answer. Spotify fully quit does not appear in this list at
     // all, and there is nothing the device can do about that.
