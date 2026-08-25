@@ -79,7 +79,25 @@ void HostLink::poll(uint32_t now_ms, bool network_up) {
       held.stop();
       holding_ = false;
     }
-    if (holding_) return;  // still waiting; do not take a second client
+  }
+
+  // A second client while one is held is ANSWERED, not ignored. Returning here
+  // left it in the listen backlog until the hold expired, which added up to a
+  // second of latency to anything else talking to the device - a browser poke,
+  // a second helper - and contradicted the design. The held client keeps its
+  // place; the newcomer just gets no command.
+  if (holding_) {
+    WiFiClient other = g_server.available();
+    if (other) {
+      static const char kBusy[] = "held\n";
+      other.printf(
+          "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+          "Content-Length: %u\r\nConnection: close\r\n\r\n%s",
+          (unsigned)(sizeof(kBusy) - 1), kBusy);
+      other.flush();
+      other.stop();
+    }
+    return;
   }
 
   WiFiClient client = g_server.available();

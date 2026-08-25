@@ -27,7 +27,16 @@ import urllib.error
 import urllib.request
 
 PROTOCOL_V = 1
-HOST = os.environ.get("KNOB_HOST", "knobspotify.local")
+# A comma-separated list, tried in order, with the one that worked remembered.
+#
+# mDNS is the right primary: it survives a DHCP lease moving, which a pinned IP
+# does not. But it is not always instantly available - the device starts its
+# responder lazily once WiFi is up, so for the first few seconds after a flash
+# the name does not resolve and macOS caches that miss. An IP fallback covers
+# exactly that window without needing a static lease on the router.
+HOSTS = [h.strip() for h in
+         os.environ.get("KNOB_HOST", "knobspotify.local").split(",")
+         if h.strip()]
 # Comfortably longer than the device's HOLD_MS, so a held request is answered by
 # the device rather than timed out here.
 TIMEOUT_S = 4.0
@@ -124,7 +133,19 @@ def audio_and_playback():
     )
     out = osa(script)
     if not out:
-        return -1, {}
+        # The combined script failed - and folding both reads into one call for
+        # speed also FOLDED THEIR FAILURES together. The volume half needs no
+        # Automation permission (get volume settings is a system call, not an
+        # Apple event to an app), so losing it because Spotify is not authorised
+        # is the optimisation costing more than it saved.
+        #
+        # Fall back to volume alone. One extra spawn, only when the fast path
+        # has already failed.
+        v = osa("output volume of (get volume settings)")
+        try:
+            return max(0, min(100, int(float(v)))), {}
+        except (TypeError, ValueError):
+            return -1, {}
     parts = out.split("\n")
     try:
         vol = max(0, min(100, int(float(parts[0]))))
@@ -243,15 +264,28 @@ def parse_response(text):
     return out
 
 
+_host_idx = 0
+
+
 def beat(token):
+    global _host_idx
+    host = HOSTS[_host_idx]
     req = urllib.request.Request(
-        f"http://{HOST}/beat",
+        f"http://{host}/beat",
         data=build_body(token),
         method="POST",
         headers={"Content-Type": "text/plain"},
     )
-    with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
-        body = r.read().decode("utf-8", "replace")
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
+            body = r.read().decode("utf-8", "replace")
+    except (urllib.error.URLError, OSError, TimeoutError):
+        # Rotate to the next candidate before propagating, so the caller's
+        # backoff applies once per full pass rather than once per address.
+        if len(HOSTS) > 1:
+            _host_idx = (_host_idx + 1) % len(HOSTS)
+            log(f"{host} unreachable; next try via {HOSTS[_host_idx]}")
+        raise
     fields = parse_response(body)
 
     # The token must come back. Without this, anything that can answer on the
@@ -274,7 +308,7 @@ def main():
     if not token:
         log("no token; set KNOB_TOKEN or write ~/.config/knob-spotify/token")
         return 1
-    log(f"starting, host={HOST}")
+    log(f"starting, hosts={','.join(HOSTS)}")
     backoff = BACKOFF_START_S
     while True:
         try:
