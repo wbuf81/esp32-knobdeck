@@ -184,6 +184,101 @@ class TestBeatVerification(unittest.TestCase):
         self.assertEqual(self.applied, [])
 
 
+
+class TestHostRotation(unittest.TestCase):
+    """Rotation caused today's most misleading log trail, and had no tests."""
+
+    def setUp(self):
+        m._host_idx = 0
+        p1 = mock.patch.object(m, "HOSTS", ["first.local", "10.0.0.9"])
+        p2 = mock.patch.object(m, "build_body", return_value=b"v=1\n")
+        for p in (p1, p2):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(lambda: setattr(m, "_host_idx", 0))
+
+    def _fail_with(self, exc):
+        return mock.patch.object(m.urllib.request, "urlopen", side_effect=exc)
+
+    def test_an_unreachable_host_rotates(self):
+        with self._fail_with(m.urllib.error.URLError("boom")):
+            with self.assertRaises(m.urllib.error.URLError):
+                m.beat("t")
+        self.assertEqual(m._host_idx, 1, "should have moved to the next host")
+
+    def test_an_http_error_does_NOT_rotate(self):
+        # The bug. HTTPError is a SUBCLASS of URLError, so the reachability
+        # handler swallowed it: an HTTP error was logged as "unreachable" AND
+        # flapped the host, when in fact the host answered - it just said no.
+        err = m.urllib.error.HTTPError("http://x/beat", 404, "Not Found", {}, None)
+        with self._fail_with(err):
+            with self.assertRaises(m.urllib.error.HTTPError):
+                m.beat("t")
+        self.assertEqual(m._host_idx, 0, "an answering host must not be rotated away")
+
+    def test_rotation_wraps_around(self):
+        with self._fail_with(OSError("down")):
+            for _ in range(4):
+                with self.assertRaises(OSError):
+                    m.beat("t")
+        self.assertEqual(m._host_idx, 0, "should have wrapped back")
+
+    def test_a_single_host_does_not_rotate(self):
+        with mock.patch.object(m, "HOSTS", ["only.local"]):
+            with self._fail_with(OSError("down")):
+                with self.assertRaises(OSError):
+                    m.beat("t")
+            self.assertEqual(m._host_idx, 0)
+
+
+class TestTimeoutBudget(unittest.TestCase):
+    def test_the_request_budget_exceeds_the_devices_hold(self):
+        # The device holds a request for HOLD_MS (1s). A shorter budget here
+        # would time out every idle beat.
+        self.assertGreater(m.TIMEOUT_S, 1.0)
+
+    def test_the_budget_survives_a_cold_mdns_resolve(self):
+        # Measured at 6.1s cold on this network against an earlier 4.0s budget,
+        # which made the first request after any cache miss fail every time and
+        # then rotate the host - looking exactly like an unreachable device.
+        self.assertGreaterEqual(m.TIMEOUT_S, 8.0)
+
+    def test_a_subprocess_cannot_outlast_the_request_it_is_for(self):
+        # A reader that outlives its request turns a LATE beat into a LOST one,
+        # which is how the locked-screen bug hid: build_body outran the POST.
+        # Enforced by inspection because the timeout is a literal in run().
+        import inspect
+        srcs = inspect.getsource(m.run)
+        self.assertIn("timeout=4", srcs)
+        self.assertLess(4, m.TIMEOUT_S)
+
+
+class TestTokenLoading(unittest.TestCase):
+    def test_the_environment_wins(self):
+        with mock.patch.dict("os.environ", {"KNOB_TOKEN": "  fromenv  "}):
+            self.assertEqual(m.read_token(), "fromenv")
+
+    def test_a_missing_file_is_empty_not_an_exception(self):
+        # main() treats empty as "not configured" and exits cleanly. Raising
+        # here would crash the LaunchAgent into a KeepAlive restart loop.
+        with mock.patch.dict("os.environ", {}, clear=True):
+            with mock.patch("builtins.open", side_effect=OSError):
+                self.assertEqual(m.read_token(), "")
+
+    def test_a_file_token_is_stripped(self):
+        data = "  abc123\n"
+        with mock.patch.dict("os.environ", {}, clear=True):
+            with mock.patch("builtins.open", mock.mock_open(read_data=data)):
+                self.assertEqual(m.read_token(), "abc123")
+
+
+class TestMainRefusesToRunUnconfigured(unittest.TestCase):
+    def test_no_token_exits_rather_than_looping(self):
+        # KeepAlive would otherwise restart it forever, hammering nothing.
+        with mock.patch.object(m, "read_token", return_value=""):
+            self.assertEqual(m.main(), 1)
+
+
 class TestBuildBody(unittest.TestCase):
     def setUp(self):
         self.locked = False

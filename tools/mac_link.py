@@ -68,11 +68,17 @@ def read_token():
 def run(args, stdin_text=None):
     """Run a command and return stdout, or None. Never raises."""
     try:
-        # 2s, not 5. The request budget is TIMEOUT_S, and a reader that can
-        # outlast it means the beat is lost rather than late - which is exactly
-        # how the locked-screen bug hid: build_body outran the POST it was for.
+        # 4s: comfortably inside the 10s request budget, so a slow reader makes
+        # a beat LATE rather than LOST - which is how the locked-screen bug hid,
+        # when build_body outran the POST it was for.
+        #
+        # Not 2s. Observed in the wild while the machine was being used
+        # remotely: Spotify does not answer Apple events promptly in that state
+        # either, and 2s turned a recoverable slow read into a timeout on every
+        # single beat. Remote access is a third case beyond locked and unlocked,
+        # and it does not always report as locked.
         out = subprocess.run(
-            args, capture_output=True, text=True, timeout=2, input=stdin_text
+            args, capture_output=True, text=True, timeout=4, input=stdin_text
         )
         if out.returncode != 0:
             log(f"{args[0]} failed: {out.stderr.strip()[:120]}")

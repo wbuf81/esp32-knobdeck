@@ -64,6 +64,20 @@ jobs:
       - name: Mac helper tests
         run: python3 -m unittest discover -s tools -p 'test_*.py' -v
 
+      # volhud.m only compiles on macOS - it needs Cocoa - so on Linux the most
+      # CI can do is check it has not been left syntactically broken. Better
+      # than nothing: the alternative is finding out when someone turns the knob
+      # and the HUD silently falls back.
+      - name: Mac HUD helper sanity
+        run: |
+          test -f tools/volhud.m
+          grep -q "NSEventTypeSystemDefined" tools/volhud.m
+          grep -q "CGEventPost" tools/volhud.m
+          echo "volhud.m present and still posts a system-defined event"
+
+      - name: Python syntax
+        run: python3 -m compileall -q tools/*.py
+
       - name: Host unit tests
         env:
           HOMEBREW_PREFIX: /usr
