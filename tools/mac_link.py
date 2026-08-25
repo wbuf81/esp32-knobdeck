@@ -236,27 +236,61 @@ def screen_locked():
     return locked
 
 
-def set_output_volume(pct):
-    """The one command this helper will act on.
+# Built from tools/volhud.m. Posts the real media-key event, which is the only
+# way to get macOS to draw its own volume HUD - see that file for what was
+# measured and ruled out.
+VOLHUD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "volhud")
 
-    Re-clamped here rather than trusted. The device is the less trusted end of a
-    channel that terminates in osascript, and an allowlist is only as good as
-    its argument checking.
+# macOS moves output volume in sixteenths, so one key step is 6.25 points. Used
+# only for the silent fallback, to turn a click count into a target.
+_STEP = 100.0 / 16.0
+
+
+def adjust_output_volume(delta):
+    """Move the output volume by `delta` clicks.
+
+    A delta, not a target, because macOS's volume keys move in discrete steps
+    and a knob produces discrete detents - so one click is one keypress, and
+    there is no absolute value for the two ends to disagree about.
+
+    Re-clamped and re-typed here rather than trusted. The device is the less
+    trusted end of a channel that terminates in a synthetic keypress, and an
+    allowlist is only as good as its argument checking.
     """
     try:
-        pct = int(pct)
+        delta = int(delta)
     except (TypeError, ValueError):
-        log("bad volume argument, ignored")
+        log("bad volume delta, ignored")
         return
-    pct = max(0, min(100, pct))
-    osa(f"set volume output volume {pct}")
-    log(f"output volume -> {pct}")
+    if delta == 0:
+        return
+    delta = max(-16, min(16, delta))
+
+    if os.access(VOLHUD, os.X_OK):
+        arg = "up" if delta > 0 else "down"
+        for _ in range(abs(delta)):
+            run([VOLHUD, arg])
+        log(f"volume {arg} x{abs(delta)} (HUD)")
+        return
+
+    # No binary: change it silently rather than not at all. Absolute, because
+    # AppleScript has no relative form - which is exactly the round trip the
+    # delta protocol exists to avoid, so this really is the worse path.
+    cur = osa("output volume of (get volume settings)")
+    try:
+        cur = int(float(cur))
+    except (TypeError, ValueError):
+        log("volhud missing and volume unreadable; nothing done")
+        return
+    target = max(0, min(100, int(round(cur + delta * _STEP))))
+    osa(f"set volume output volume {target}")
+    log(f"volume {cur} -> {target} (silent; build tools/volhud for the HUD)")
 
 
 # Only these keys are ever acted on. Adding a capability means adding an entry
 # here with a typed handler, not widening a hole.
 HANDLERS = {
-    "set_output_volume": set_output_volume,
+    "adjust_output_volume": adjust_output_volume,
 }
 
 

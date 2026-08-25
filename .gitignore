@@ -3,3 +3,6 @@
 .DS_Store
 src/config/secrets.h
 .claude.local.md
+
+# Compiled locally; the Accessibility grant is bound to the path.
+tools/volhud

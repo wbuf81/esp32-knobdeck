@@ -17,10 +17,10 @@ import mac_link as m
 
 class TestParseResponse(unittest.TestCase):
     def test_parses_key_value_lines(self):
-        f = m.parse_response("v=1\ntok=abc\nset_output_volume=42\n")
+        f = m.parse_response("v=1\ntok=abc\nadjust_output_volume=2\n")
         self.assertEqual(f["v"], "1")
         self.assertEqual(f["tok"], "abc")
-        self.assertEqual(f["set_output_volume"], "42")
+        self.assertEqual(f["adjust_output_volume"], "2")
 
     def test_ignores_lines_without_an_equals(self):
         # A blank line or a stray header must not become a field.
@@ -40,37 +40,97 @@ class TestParseResponse(unittest.TestCase):
         self.assertEqual(f["tok"], "abc")
 
 
-class TestVolumeClamping(unittest.TestCase):
-    """The device is the less trusted end of a channel ending in osascript."""
+class TestVolumeAdjust(unittest.TestCase):
+    """The device is the less trusted end of a channel ending in a keypress."""
 
     def setUp(self):
-        self.sent = []
-        patcher = mock.patch.object(m, "osa", side_effect=self.sent.append)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.runs = []
+        self.osa = []
+        p1 = mock.patch.object(m, "run", side_effect=lambda a, **k: self.runs.append(a))
+        p2 = mock.patch.object(m, "osa", side_effect=lambda s: self.osa.append(s))
+        # volhud present and executable: the HUD path.
+        p3 = mock.patch("os.access", return_value=True)
+        for p in (p1, p2, p3):
+            p.start()
+            self.addCleanup(p.stop)
 
-    def test_in_range_passes_through(self):
-        m.set_output_volume("42")
-        self.assertIn("set volume output volume 42", self.sent[0])
+    def test_one_detent_is_one_keypress(self):
+        m.adjust_output_volume("1")
+        self.assertEqual(len(self.runs), 1)
+        self.assertEqual(self.runs[0][1], "up")
 
-    def test_above_range_is_clamped(self):
-        m.set_output_volume("500")
-        self.assertIn("set volume output volume 100", self.sent[0])
+    def test_three_detents_are_three_keypresses(self):
+        # A delta is a count of clicks, and the HUD steps once per press.
+        m.adjust_output_volume("3")
+        self.assertEqual(len(self.runs), 3)
+        self.assertTrue(all(r[1] == "up" for r in self.runs))
 
-    def test_below_range_is_clamped(self):
-        m.set_output_volume("-9")
-        self.assertIn("set volume output volume 0", self.sent[0])
+    def test_a_negative_delta_presses_down(self):
+        m.adjust_output_volume("-2")
+        self.assertEqual([r[1] for r in self.runs], ["down", "down"])
+
+    def test_zero_does_nothing(self):
+        m.adjust_output_volume("0")
+        self.assertEqual(self.runs, [])
+        self.assertEqual(self.osa, [])
 
     def test_non_numeric_is_refused_entirely(self):
-        # Not clamped to a default - REFUSED. A garbage argument means the
-        # device is not saying what we think, and guessing a volume from it
-        # would be inventing an instruction.
-        m.set_output_volume("; rm -rf /")
-        self.assertEqual(self.sent, [])
+        # Not clamped to a default - REFUSED. A garbage argument means the device
+        # is not saying what we think, and guessing a volume from it would be
+        # inventing an instruction.
+        m.adjust_output_volume("; rm -rf /")
+        self.assertEqual(self.runs, [])
+        self.assertEqual(self.osa, [])
 
     def test_a_float_string_is_refused_rather_than_truncated(self):
-        m.set_output_volume("42.9")
-        self.assertEqual(self.sent, [])
+        m.adjust_output_volume("2.9")
+        self.assertEqual(self.runs, [])
+
+    def test_an_absurd_delta_is_clamped(self):
+        # One stuck report must not be able to spin the volume end to end.
+        m.adjust_output_volume("9999")
+        self.assertEqual(len(self.runs), 16)
+
+    def test_the_hud_binary_is_preferred_over_applescript(self):
+        m.adjust_output_volume("1")
+        self.assertEqual(self.osa, [], "must not fall back while volhud exists")
+
+
+class TestVolumeAdjustFallback(unittest.TestCase):
+    """No volhud: change it silently rather than not at all."""
+
+    def setUp(self):
+        self.osa = []
+
+        def fake_osa(script):
+            self.osa.append(script)
+            if "get volume settings" in script:
+                return "50"
+            return ""
+
+        p1 = mock.patch.object(m, "osa", side_effect=fake_osa)
+        p2 = mock.patch.object(m, "run", side_effect=AssertionError("no binary"))
+        p3 = mock.patch("os.access", return_value=False)
+        for p in (p1, p2, p3):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_falls_back_to_an_absolute_set(self):
+        # One step is 100/16 = 6.25 points, so +2 from 50 lands on about 62.
+        m.adjust_output_volume("2")
+        sets = [s for s in self.osa if s.startswith("set volume")]
+        self.assertEqual(len(sets), 1)
+        self.assertIn("62", sets[0])
+
+    def test_the_fallback_clamps_at_the_top(self):
+        m.adjust_output_volume("16")
+        sets = [s for s in self.osa if s.startswith("set volume")]
+        self.assertIn("100", sets[0])
+
+    def test_the_fallback_clamps_at_the_bottom(self):
+        m.adjust_output_volume("-16")
+        sets = [s for s in self.osa if s.startswith("set volume")]
+        self.assertIn("0", sets[0])
 
 
 class TestBeatVerification(unittest.TestCase):
@@ -80,7 +140,7 @@ class TestBeatVerification(unittest.TestCase):
         self.applied = []
         p1 = mock.patch.object(m, "build_body", return_value=b"v=1\n")
         p2 = mock.patch.dict(
-            m.HANDLERS, {"set_output_volume": self.applied.append}, clear=True
+            m.HANDLERS, {"adjust_output_volume": self.applied.append}, clear=True
         )
         p1.start()
         p2.start()
@@ -95,24 +155,24 @@ class TestBeatVerification(unittest.TestCase):
         return mock.patch.object(m.urllib.request, "urlopen", return_value=resp)
 
     def test_a_matching_token_applies_the_command(self):
-        with self._respond("v=1\ntok=s3cret\nset_output_volume=42\n"):
+        with self._respond("v=1\ntok=s3cret\nadjust_output_volume=2\n"):
             m.beat("s3cret")
-        self.assertEqual(self.applied, ["42"])
+        self.assertEqual(self.applied, ["2"])
 
     def test_a_mismatched_token_applies_nothing(self):
         # Not theatre. Without this, anything that can answer on the device's
         # address - ARP or mDNS spoofing - could drive this Mac.
-        with self._respond("v=1\ntok=WRONG\nset_output_volume=42\n"):
+        with self._respond("v=1\ntok=WRONG\nadjust_output_volume=2\n"):
             m.beat("s3cret")
         self.assertEqual(self.applied, [])
 
     def test_a_missing_token_applies_nothing(self):
-        with self._respond("v=1\nset_output_volume=42\n"):
+        with self._respond("v=1\nadjust_output_volume=2\n"):
             m.beat("s3cret")
         self.assertEqual(self.applied, [])
 
     def test_a_wrong_version_applies_nothing(self):
-        with self._respond("v=2\ntok=s3cret\nset_output_volume=42\n"):
+        with self._respond("v=2\ntok=s3cret\nadjust_output_volume=2\n"):
             m.beat("s3cret")
         self.assertEqual(self.applied, [])
 

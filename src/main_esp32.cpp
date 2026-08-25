@@ -420,15 +420,18 @@ void loop() {
                             !g_hostlink.macStale(now);
     if (mac_volume && g_screen == Screen::Player) {
       if (g_volume < 0) {
-        // Start from the Mac's real level rather than a guess, so the first
-        // detent nudges what you can hear instead of jumping to 50.
+        // Start from the Mac's real level rather than a guess, so the ring shows
+        // something true before the first beat comes back.
         const int mv = g_hostlink.mac().state().out_vol;
         g_volume = mv >= 0 ? mv : 50;
       }
-      g_volume += detents * 2;
+      // The RING is an optimistic local estimate; the COMMAND is a click count.
+      // macOS moves output volume in sixteenths, so one detent is about six
+      // points - close enough for a ring that the next beat corrects anyway.
+      g_volume += detents * 6;
       if (g_volume < 0) g_volume = 0;
       if (g_volume > 100) g_volume = 100;
-      g_hostlink.mac().requestOutputVolume(g_volume);
+      g_hostlink.mac().requestOutputVolumeDelta(detents);
       // Long enough for the command to reach the Mac and for the NEXT beat to
       // carry the result back: one hold plus a beat, with room to spare.
       g_mac_vol_settle.arm(now, 3000);

@@ -85,11 +85,21 @@ class MacLink {
   // anything on the LAN darken the screen.
   bool applyBeat(const char *body, uint32_t now_ms);
 
-  // The knob wants the Mac's output volume set. Replaces any pending value:
-  // only the final position of a spin matters, the same coalescing the Spotify
-  // volume command already does.
-  void requestOutputVolume(int pct);
-  bool hasPending() const { return pending_vol_ >= 0; }
+  // The knob turned by `detents`. ACCUMULATED, not replaced: a delta is a
+  // count of clicks, so two clicks while one is in flight is four clicks, where
+  // an absolute target would have discarded the first.
+  //
+  // A delta rather than a target because macOS's volume keys move in discrete
+  // steps and a knob produces discrete detents - one maps to the other exactly.
+  // It also removes a feedback loop that an absolute target could not avoid: the
+  // helper reads the volume BEFORE applying a pending command, so it always
+  // reports a value one command stale, and the device resyncing to that made the
+  // knob fight itself.
+  void requestOutputVolumeDelta(int detents);
+  bool hasPending() const { return pending_delta_ != 0; }
+
+  // Clamped so one stuck report cannot spin the volume end to end.
+  static constexpr int MAX_DELTA = 16;
 
   // Writes the response body and CLEARS the pending command, so it is delivered
   // exactly once. Returns the length written, or 0 if it would not fit.
@@ -104,7 +114,7 @@ class MacLink {
  private:
   MacState state_;
   char token_[TOKEN_CAP] = {};
-  int pending_vol_ = -1;
+  int pending_delta_ = 0;
   uint32_t last_beat_ms_ = 0;
 };
 

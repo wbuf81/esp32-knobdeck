@@ -113,24 +113,24 @@ bool MacLink::applyBeat(const char *body, uint32_t now_ms) {
   return true;
 }
 
-void MacLink::requestOutputVolume(int pct) {
+void MacLink::requestOutputVolumeDelta(int detents) {
   if (!commandChannelEnabled()) return;
-  if (pct < 0) pct = 0;
-  if (pct > 100) pct = 100;
-  pending_vol_ = pct;  // replaces any pending value
+  pending_delta_ += detents;  // accumulated: clicks add up, they do not replace
+  if (pending_delta_ > MAX_DELTA) pending_delta_ = MAX_DELTA;
+  if (pending_delta_ < -MAX_DELTA) pending_delta_ = -MAX_DELTA;
 }
 
 int MacLink::buildResponse(char *out, size_t cap) {
   if (out == nullptr || cap == 0) return 0;
   int n = 0;
-  if (pending_vol_ >= 0) {
-    n = std::snprintf(out, cap, "v=%d\ntok=%s\nset_output_volume=%d\n",
-                      PROTOCOL_V, token_, pending_vol_);
+  if (pending_delta_ != 0) {
+    n = std::snprintf(out, cap, "v=%d\ntok=%s\nadjust_output_volume=%d\n",
+                      PROTOCOL_V, token_, pending_delta_);
   } else {
     n = std::snprintf(out, cap, "v=%d\ntok=%s\n", PROTOCOL_V, token_);
   }
   if (n < 0 || static_cast<size_t>(n) >= cap) return 0;
-  pending_vol_ = -1;  // delivered exactly once
+  pending_delta_ = 0;  // delivered exactly once
   return n;
 }
 

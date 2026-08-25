@@ -3616,38 +3616,64 @@ void test_maclink_empty_token_disables_the_command_channel(void) {
   // password. Sleep state still works; commands do not exist.
   net::MacLink ml;
   TEST_ASSERT_FALSE(ml.commandChannelEnabled());
-  ml.requestOutputVolume(42);
+  ml.requestOutputVolumeDelta(1);
   TEST_ASSERT_FALSE(ml.hasPending());
   ml.setToken("s3cret");
   TEST_ASSERT_TRUE(ml.commandChannelEnabled());
 }
 
-void test_maclink_coalesces_volume_requests(void) {
-  // A fast spin sends the final value once, the same coalescing the Spotify
-  // volume command already does.
+void test_maclink_accumulates_detents_rather_than_replacing(void) {
+  // A delta is a COUNT OF CLICKS, so three clicks while one is in flight is
+  // three clicks. An absolute target would have discarded the earlier two - and
+  // did, which is why the knob fought itself.
   net::MacLink ml;
   ml.setToken("s3cret");
-  ml.requestOutputVolume(10);
-  ml.requestOutputVolume(20);
-  ml.requestOutputVolume(30);
+  ml.requestOutputVolumeDelta(1);
+  ml.requestOutputVolumeDelta(1);
+  ml.requestOutputVolumeDelta(1);
   TEST_ASSERT_TRUE(ml.hasPending());
   char buf[256];
-  const int n = ml.buildResponse(buf, sizeof(buf));
-  TEST_ASSERT_TRUE(n > 0);
-  TEST_ASSERT_TRUE(std::strstr(buf, "set_output_volume=30") != nullptr);
-  TEST_ASSERT_TRUE(std::strstr(buf, "set_output_volume=10") == nullptr);
+  TEST_ASSERT_TRUE(ml.buildResponse(buf, sizeof(buf)) > 0);
+  TEST_ASSERT_TRUE(std::strstr(buf, "adjust_output_volume=3") != nullptr);
 }
 
-void test_maclink_clamps_the_volume_argument(void) {
+void test_maclink_detents_cancel_out(void) {
+  // Turn up then back down and nothing should be sent at all.
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  ml.requestOutputVolumeDelta(2);
+  ml.requestOutputVolumeDelta(-2);
+  TEST_ASSERT_FALSE(ml.hasPending());
+  char buf[256];
+  ml.buildResponse(buf, sizeof(buf));
+  TEST_ASSERT_TRUE(std::strstr(buf, "adjust_output_volume") == nullptr);
+}
+
+void test_maclink_carries_a_negative_delta(void) {
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  ml.requestOutputVolumeDelta(-3);
+  char buf[256];
+  ml.buildResponse(buf, sizeof(buf));
+  TEST_ASSERT_TRUE(std::strstr(buf, "adjust_output_volume=-3") != nullptr);
+}
+
+void test_maclink_clamps_the_delta_both_ways(void) {
+  // One stuck report must not be able to spin the volume end to end.
   net::MacLink ml;
   ml.setToken("s3cret");
   char buf[256];
-  ml.requestOutputVolume(500);
+  for (int i = 0; i < 100; ++i) ml.requestOutputVolumeDelta(1);
   ml.buildResponse(buf, sizeof(buf));
-  TEST_ASSERT_TRUE(std::strstr(buf, "set_output_volume=100") != nullptr);
-  ml.requestOutputVolume(-9);
+  char expect[48];
+  std::snprintf(expect, sizeof(expect), "adjust_output_volume=%d",
+                net::MacLink::MAX_DELTA);
+  TEST_ASSERT_TRUE(std::strstr(buf, expect) != nullptr);
+  for (int i = 0; i < 100; ++i) ml.requestOutputVolumeDelta(-1);
   ml.buildResponse(buf, sizeof(buf));
-  TEST_ASSERT_TRUE(std::strstr(buf, "set_output_volume=0") != nullptr);
+  std::snprintf(expect, sizeof(expect), "adjust_output_volume=%d",
+                -net::MacLink::MAX_DELTA);
+  TEST_ASSERT_TRUE(std::strstr(buf, expect) != nullptr);
 }
 
 void test_maclink_delivers_a_command_once(void) {
@@ -3655,12 +3681,12 @@ void test_maclink_delivers_a_command_once(void) {
   // the volume again on the next beat, after the knob had stopped.
   net::MacLink ml;
   ml.setToken("s3cret");
-  ml.requestOutputVolume(42);
+  ml.requestOutputVolumeDelta(2);
   char buf[256];
   ml.buildResponse(buf, sizeof(buf));
   TEST_ASSERT_FALSE(ml.hasPending());
   ml.buildResponse(buf, sizeof(buf));
-  TEST_ASSERT_TRUE(std::strstr(buf, "set_output_volume") == nullptr);
+  TEST_ASSERT_TRUE(std::strstr(buf, "adjust_output_volume") == nullptr);
 }
 
 void test_maclink_response_always_carries_version_and_token(void) {
@@ -4713,8 +4739,10 @@ int main(int, char **) {
   RUN_TEST(test_maclink_ignores_unknown_keys);
   RUN_TEST(test_maclink_missing_volume_reads_as_unknown);
   RUN_TEST(test_maclink_empty_token_disables_the_command_channel);
-  RUN_TEST(test_maclink_coalesces_volume_requests);
-  RUN_TEST(test_maclink_clamps_the_volume_argument);
+  RUN_TEST(test_maclink_accumulates_detents_rather_than_replacing);
+  RUN_TEST(test_maclink_detents_cancel_out);
+  RUN_TEST(test_maclink_carries_a_negative_delta);
+  RUN_TEST(test_maclink_clamps_the_delta_both_ways);
   RUN_TEST(test_maclink_delivers_a_command_once);
   RUN_TEST(test_maclink_response_always_carries_version_and_token);
   RUN_TEST(test_maclink_goes_stale_and_survives_the_millis_wrap);
