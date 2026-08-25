@@ -33,8 +33,14 @@ namespace fx {
 
 class Record {
  public:
-  // 33 1/3 RPM, in turns per second. The number is the point of the theme.
-  static constexpr float TURNS_PER_S = 100.0f / 180.0f;
+  // Turns per second. NINE SECONDS per revolution.
+  //
+  // Not 33 1/3 RPM, which was the first version and was far too fast to look
+  // at. A real record spins at 1.8 s per revolution and reads as slow because
+  // it is twelve inches across and sitting in the corner of the room; the same
+  // rate on a 360-pixel disc filling your whole field of view reads as a
+  // washing machine. The trivia lost to the eye, which is the right way round.
+  static constexpr float TURNS_PER_S = 1.0f / 9.0f;
 
   // Outer edge of the disc, just inside where the progress ring lives so the
   // two do not touch.

@@ -3274,8 +3274,9 @@ void test_record_actually_spins(void) {
   fx::Record a, b;
   a.begin();
   b.begin();
-  // A sixth of a turn apart at 33 1/3 RPM.
-  for (int i = 0; i < 9; ++i) b.update(1.0f / 30.0f);
+  // A quarter turn apart, expressed in turns rather than in frames, so tuning
+  // the spin speed does not quietly turn this assertion into a coin flip.
+  b.update(0.25f / fx::Record::TURNS_PER_S);
   gfx::Surface sa = fullSurface(early);
   gfx::Surface sb = fullSurface(later);
   a.drawBand(sa, &cover, 0x07E0);
@@ -3296,8 +3297,9 @@ void test_record_spin_is_frame_rate_independent(void) {
   for (int i = 0; i < 30; ++i) slow.update(1.0f / 30.0f);
   for (int i = 0; i < 60; ++i) fast.update(1.0f / 60.0f);
   TEST_ASSERT_FLOAT_WITHIN(0.02f, slow.turns(), fast.turns());
-  // And a second of 33 1/3 RPM really is about 5/9 of a turn.
-  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.5555f, slow.turns());
+  // And one second really is one second's worth of turning. Asserted against
+  // the constant rather than a literal copy of it, so the two cannot drift.
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, fx::Record::TURNS_PER_S, slow.turns());
 }
 
 void test_record_is_bit_exact_across_runs(void) {
