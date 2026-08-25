@@ -50,6 +50,7 @@
 #include "shell/RadialShell.h"
 #include "views/CoverLight.h"
 #include "views/DaisyIdle.h"
+#include "views/SafeScreen.h"
 #include "fx/ThemePicker.h"
 #include "config/ThemePref.h"
 
@@ -69,6 +70,11 @@ shell::ListView g_list;
 shell::ConfirmRing g_confirm;
 shell::GestureFlash g_flash;
 views::DaisyIdle g_dog;
+views::SafeScreen g_safe;
+// Latched at boot from the crash streak. Not re-read per frame: a mode that
+// could change under the render loop is a mode with two code paths live at
+// once, which is how a diagnostic screen ends up half-drawn over an effect.
+bool g_safe_mode = false;
 fx::ThemePicker g_picker;
 spotify::Library g_library;
 
@@ -170,6 +176,9 @@ void setup() {
   delay(1500);
   esp32::printBootBanner();
 
+  // Latched once, immediately after the banner has decided it.
+  g_safe_mode = esp32::safeMode();
+
   g_panel_ok = esp32::panelBegin();
   if (!g_panel_ok) {
     LOGF("panel: FAILED. Check Pins.h.");
@@ -222,7 +231,15 @@ void setup() {
                 g_cfg.wifi_ssid.empty() ? "MISSING" : "set",
                 g_cfg.refresh_token.empty() ? "MISSING" : "set");
 
-  if (g_cfg.complete()) {
+  if (g_safe_mode) {
+    // The two most likely sources of a repeated panic are the network stack
+    // (TLS, JSON, heap) and the render path (DMA, PSRAM, the SPI deadlock the
+    // watchdog exists for). Safe mode runs neither, so the panel and the serial
+    // port survive to say why - which is the whole point, because a crash loop
+    // takes USB-CDC down with it and no amount of retrying esptool gets it back.
+    g_safe.begin(esp32::resetReasonText(), esp32::crashStreak());
+    LOGF("safe mode: net and effects disabled this boot");
+  } else if (g_cfg.complete()) {
     static NetWorker net(g_cfg.client_id.c_str(), g_cfg.client_secret.c_str(),
                          g_cfg.refresh_token.c_str());
     g_net = &net;
@@ -236,9 +253,52 @@ void setup() {
   } else {
     LOGF("net: config incomplete; running visuals only");
   }
+
+  // LAST. Panel bring-up, the I2C scan and the 1.5 s serial settle all happen
+  // above, and subscribing before them would make a slow boot look like a hang.
+  esp32::watchdogBegin();
+}
+
+// The whole frame, in safe mode.
+//
+// Deliberately does not touch the effects, the net worker, the analyzer, the
+// cover cache or the shell - not because they would necessarily fail, but
+// because a diagnostic that shares code with the thing being diagnosed tells
+// you nothing when it also breaks. Backlight is forced bright: this screen
+// exists to be read, and dimming it after 45 s would hide the message.
+void safeModeFrame() {
+  if (!g_panel_ok) {
+    delay(200);
+    return;
+  }
+  esp32::panelBacklight(core::Backlight::BRIGHT);
+  esp32::panelBeginFrame();
+  for (int y = 0; y < gfx::H; y += esp32::PANEL_BAND_H) {
+    gfx::Surface s;
+    s.px = esp32::panelNextBand();
+    s.w = gfx::W;
+    s.h = esp32::PANEL_BAND_H;
+    s.y0 = y;
+    g_safe.renderBand(s);
+    esp32::panelCommitBand();
+  }
+  esp32::panelEndFrame();
+  // A static screen has no reason to run at 126 fps, and the idle time is the
+  // best evidence available that the device is not the thing that is stuck.
+  delay(100);
 }
 
 void loop() {
+  // First thing, unconditionally. Everything below this line is allowed to be
+  // slow; none of it is allowed to be stuck.
+  esp32::watchdogFeed();
+  esp32::noteUptime(millis());
+
+  if (g_safe_mode) {
+    safeModeFrame();
+    return;
+  }
+
   const uint64_t t_frame = esp_timer_get_time();
   const float dt = g_clock.tick(millis());
   const uint32_t now = millis();

@@ -15,6 +15,7 @@
 #include "core/FrameClock.h"
 #include "core/Backlight.h"
 #include "net/HostLink.h"
+#include "core/CrashPolicy.h"
 #include "core/Hash.h"
 #include "core/Rng.h"
 #include "gfx/Blend.h"
@@ -42,6 +43,7 @@
 #include "shell/Glyphs.h"
 #include "views/CoverLight.h"
 #include "views/DaisyIdle.h"
+#include "views/SafeScreen.h"
 #include "shell/ListView.h"
 #include "shell/NowPlaying.h"
 #include "shell/RadialShell.h"
@@ -2681,6 +2683,152 @@ void test_transport_feedback_shows_for_a_track_without_a_known_device(void) {
   TEST_ASSERT_TRUE(shell::transportFeedbackVisible(true, false));
 }
 
+
+// ---------------------------------------------------------------------------
+// Crash policy
+// ---------------------------------------------------------------------------
+
+void test_an_abnormal_reset_counts_and_a_clean_one_clears(void) {
+  TEST_ASSERT_EQUAL_INT(1, core::nextCrashStreak(0, true));
+  TEST_ASSERT_EQUAL_INT(3, core::nextCrashStreak(2, true));
+  TEST_ASSERT_EQUAL_INT(0, core::nextCrashStreak(2, false));
+}
+
+void test_safe_mode_waits_for_the_third_crash(void) {
+  TEST_ASSERT_FALSE(core::safeModeWanted(0));
+  TEST_ASSERT_FALSE(core::safeModeWanted(core::SAFE_MODE_STREAK - 1));
+  TEST_ASSERT_TRUE(core::safeModeWanted(core::SAFE_MODE_STREAK));
+  TEST_ASSERT_TRUE(core::safeModeWanted(core::SAFE_MODE_STREAK + 5));
+}
+
+void test_a_crash_loop_reaches_safe_mode(void) {
+  // Three crashes with no healthy window between them. This is the case safe
+  // mode exists for: without it the device reboots forever and takes USB-CDC
+  // down with it, and the only recovery is unplugging the board.
+  int streak = 0;
+  for (int i = 0; i < 3; ++i) streak = core::nextCrashStreak(streak, true);
+  TEST_ASSERT_TRUE(core::safeModeWanted(streak));
+}
+
+void test_crashes_months_apart_never_reach_safe_mode(void) {
+  // The bug this fixes. The streak is stored in NVS and was only ever cleared
+  // by a CLEAN reset reason, so a board that crashed once, ran happily for a
+  // month, then crashed again was two thirds of the way to locking itself into
+  // safe mode for reasons that had nothing to do with each other.
+  int streak = 0;
+  for (int i = 0; i < 10; ++i) {
+    streak = core::nextCrashStreak(streak, true);
+    TEST_ASSERT_FALSE(core::safeModeWanted(streak));
+    // ...and then it runs for a month.
+    if (core::streakForgiven(core::HEALTHY_AFTER_MS)) streak = 0;
+  }
+}
+
+void test_the_streak_is_forgiven_only_after_a_real_run(void) {
+  TEST_ASSERT_FALSE(core::streakForgiven(0));
+  TEST_ASSERT_FALSE(core::streakForgiven(core::HEALTHY_AFTER_MS - 1));
+  TEST_ASSERT_TRUE(core::streakForgiven(core::HEALTHY_AFTER_MS));
+}
+
+void test_the_streak_is_capped_so_nvs_is_not_written_forever(void) {
+  // Unbounded increment means a write to flash on every boot of a board that
+  // is never going to recover, for a number nothing reads above the threshold.
+  int streak = 0;
+  for (int i = 0; i < 1000; ++i) streak = core::nextCrashStreak(streak, true);
+  TEST_ASSERT_TRUE(streak <= core::CRASH_STREAK_MAX);
+  TEST_ASSERT_TRUE(core::safeModeWanted(streak));
+}
+
+void test_a_corrupt_stored_streak_does_not_break_the_count(void) {
+  // NVS can come back with anything if the partition is damaged. A negative
+  // value must not walk backwards away from safe mode on a board that is
+  // visibly crashing.
+  TEST_ASSERT_EQUAL_INT(1, core::nextCrashStreak(-5, true));
+  TEST_ASSERT_EQUAL_INT(0, core::nextCrashStreak(-5, false));
+  TEST_ASSERT_TRUE(core::nextCrashStreak(999999, true) <= core::CRASH_STREAK_MAX);
+}
+
+
+// ---------------------------------------------------------------------------
+// Safe-mode screen
+// ---------------------------------------------------------------------------
+
+void test_safe_screen_owns_every_pixel(void) {
+  // Same rule as the dog: it replaces the view rather than drawing over one, so
+  // a pixel it fails to write shows the previous frame through - and on a
+  // banded panel that is stale garbage. A safe-mode screen with garbage on it
+  // is worse than no safe mode, because it reads as the crash.
+  gfx::Framebuffer fb;
+  fb.fill(0xF81F);
+  views::SafeScreen s;
+  s.begin("PANIC (crash)", 3);
+  gfx::Surface surf = fullSurface(fb);
+  s.renderBand(surf);
+  int leftover = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (fb.at(x, y) == 0xF81F) ++leftover;
+  TEST_ASSERT_EQUAL_INT(0, leftover);
+}
+
+void test_safe_screen_drawn_in_bands_matches_full_frame(void) {
+  gfx::Framebuffer whole, banded;
+  whole.fill(0x0000);
+  banded.fill(0x0000);
+  views::SafeScreen a, b;
+  a.begin("task watchdog", 4);
+  b.begin("task watchdog", 4);
+  gfx::Surface s = fullSurface(whole);
+  a.renderBand(s);
+  for (int y = 0; y < gfx::H; y += 20) {
+    gfx::Surface bs;
+    bs.px = banded.pixels() + static_cast<size_t>(y) * gfx::W;
+    bs.w = gfx::W;
+    bs.h = 20;
+    bs.y0 = y;
+    b.renderBand(bs);
+  }
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (whole.at(x, y) != banded.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+void test_safe_screen_draws_something_legible(void) {
+  // It is all text. If the font path silently drew nothing this screen would be
+  // a flat colour, which says "broken" but not why.
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  views::SafeScreen s;
+  s.begin("brownout", 3);
+  gfx::Surface surf = fullSurface(fb);
+  s.renderBand(surf);
+  // Ink is counted as "differs from the backdrop", sampled from a central box
+  // that the bezel ring cannot reach. Not an exact colour match: glyphs are
+  // alpha-blended, so only a couple of hundred pixels land on pure white out of
+  // fifteen hundred that are visibly text, and asserting on the exact value
+  // measured the blend rather than the legibility.
+  const uint16_t bg = fb.at(2, 2);  // a corner: backdrop only, never a glyph
+  int ink = 0;
+  for (int y = 110; y < 265; ++y)
+    for (int x = 100; x < 260; ++x)
+      if (fb.at(x, y) != bg) ++ink;
+  TEST_ASSERT_TRUE(ink > 500);
+}
+
+void test_safe_screen_survives_a_null_reason(void) {
+  // esp_reset_reason() has a default branch, and a screen that crashes while
+  // reporting a crash is the worst possible bug in this file.
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  views::SafeScreen s;
+  s.begin(nullptr, 0);
+  gfx::Surface surf = fullSurface(fb);
+  s.renderBand(surf);
+  TEST_ASSERT_TRUE(true);  // reaching here without a crash is the assertion
+}
+
 // ---------------------------------------------------------------------------
 // Themes and the picker
 // ---------------------------------------------------------------------------
@@ -3581,6 +3729,17 @@ int main(int, char **) {
   RUN_TEST(test_transport_feedback_hides_when_nothing_is_listening);
   RUN_TEST(test_transport_feedback_shows_for_an_idle_device_with_no_track);
   RUN_TEST(test_transport_feedback_shows_for_a_track_without_a_known_device);
+  RUN_TEST(test_an_abnormal_reset_counts_and_a_clean_one_clears);
+  RUN_TEST(test_safe_mode_waits_for_the_third_crash);
+  RUN_TEST(test_a_crash_loop_reaches_safe_mode);
+  RUN_TEST(test_crashes_months_apart_never_reach_safe_mode);
+  RUN_TEST(test_the_streak_is_forgiven_only_after_a_real_run);
+  RUN_TEST(test_the_streak_is_capped_so_nvs_is_not_written_forever);
+  RUN_TEST(test_a_corrupt_stored_streak_does_not_break_the_count);
+  RUN_TEST(test_safe_screen_owns_every_pixel);
+  RUN_TEST(test_safe_screen_drawn_in_bands_matches_full_frame);
+  RUN_TEST(test_safe_screen_draws_something_legible);
+  RUN_TEST(test_safe_screen_survives_a_null_reason);
   RUN_TEST(test_every_theme_has_a_name_and_a_distinct_spawn);
   RUN_TEST(test_rain_falls_and_the_others_do_not);
   RUN_TEST(test_rain_does_not_burst_on_the_beat);

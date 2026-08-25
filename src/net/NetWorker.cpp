@@ -3,7 +3,6 @@
 #include <cstdint>
 
 #include "../core/Clock.h"
-#include "../core/Diag.h"
 #include "../core/MergePolicy.h"
 #include "NetLog.h"
 
