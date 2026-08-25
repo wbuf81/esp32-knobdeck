@@ -67,14 +67,20 @@ class CommandQueue {
 
   // Replaces any pending command of this type. Used to coalesce volume changes
   // during a long-press so only the final value is sent.
-  void pushCoalesced(Command c) {
+  //
+  // Returns false only when there was nothing to coalesce with AND the ring was
+  // full. This used to return void and throw away push()'s answer, which made
+  // it the quietest drop in the codebase: a volume command arriving with
+  // nothing of its type pending and no room left simply vanished. Same bug as
+  // submit()'s void signature, one level further down.
+  bool pushCoalesced(Command c) {
     for (int i = tail_; i != head_; i = (i + 1) % CAPACITY) {
       if (buf_[i].type == c.type) {
         buf_[i] = c;
-        return;
+        return true;
       }
     }
-    push(c);
+    return push(c);
   }
 
   bool empty() const { return head_ == tail_; }

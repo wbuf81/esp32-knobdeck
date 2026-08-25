@@ -81,16 +81,15 @@ void NetWorker::taskEntry(void *self) {
 }
 #endif
 
-void NetWorker::submit(const Command &in) {
+bool NetWorker::submit(const Command &in) {
   Command c = in;
   c.submitted_ms = nowMs();
   std::lock_guard<std::mutex> lk(mtx_);
   if (c.type == CommandType::SetVolume) {
     // Only the final volume matters; replace any pending one.
-    cmds_.pushCoalesced(c);
-  } else {
-    cmds_.push(c);
+    return cmds_.pushCoalesced(c);
   }
+  return cmds_.push(c);
 }
 
 bool NetWorker::stalled(uint32_t now_ms) const {

@@ -396,7 +396,12 @@ void loop() {
         Command c;
         c.type = CommandType::SetVolume;
         c.arg = g_volume;
-        g_net->submit(c);
+        if (!g_net->submit(c)) {
+          // The knob outran the net task. Saying so is the whole point: this
+          // was a turn that moved the ring and then quietly changed nothing.
+          g_net->mutate([now](AppState &a) { a.showToast("Busy", now); });
+          LOGF("volume DROPPED: queue full");
+        }
         g_net->mutate([](AppState &a) { a.settle_volume.arm(millis(), 1200); });
       }
       LOGF("knob: %+d -> volume %d%%", detents, g_volume);
@@ -717,7 +722,13 @@ void loop() {
         }
         break;
     }
-    if (send && g_net) g_net->submit(c);
+    if (send && g_net && !g_net->submit(c)) {
+      // A dropped command is a gesture that did nothing, AFTER the glyph
+      // already flashed to say it worked. That is the failure GestureFlash was
+      // built to remove, so leaving it silent here would undo the point of it.
+      g_net->mutate([now](AppState &a) { a.showToast("Busy, try again", now); });
+      LOGF("command DROPPED: queue full");
+    }
   }
 
   // The marker eases to the answer for the same reason the list does: a snap

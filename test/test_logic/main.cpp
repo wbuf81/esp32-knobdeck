@@ -15,6 +15,7 @@
 #include "core/FrameClock.h"
 #include "core/Backlight.h"
 #include "net/HostLink.h"
+#include "core/CommandQueue.h"
 #include "core/CrashPolicy.h"
 #include "core/Hash.h"
 #include "core/Rng.h"
@@ -2954,6 +2955,67 @@ void test_nowplaying_suppresses_times_for_a_toast(void) {
   TEST_ASSERT_EQUAL_INT(0, ink_b);
 }
 
+
+// ---------------------------------------------------------------------------
+// Command queue
+// ---------------------------------------------------------------------------
+
+void test_command_queue_reports_a_drop_rather_than_hiding_it(void) {
+  // The ring holds CAPACITY-1 entries; the last slot is what distinguishes
+  // full from empty. What matters is that the caller is TOLD - a silently
+  // dropped command is a gesture that did nothing after the glyph said it
+  // worked, which is the exact failure GestureFlash exists to prevent.
+  CommandQueue<4> q;
+  Command c;
+  c.type = CommandType::Next;
+  TEST_ASSERT_TRUE(q.push(c));
+  TEST_ASSERT_TRUE(q.push(c));
+  TEST_ASSERT_TRUE(q.push(c));
+  TEST_ASSERT_FALSE(q.push(c));
+}
+
+void test_command_queue_accepts_again_after_a_pop(void) {
+  CommandQueue<4> q;
+  Command c;
+  c.type = CommandType::Next;
+  while (q.push(c)) {
+  }
+  Command out;
+  TEST_ASSERT_TRUE(q.pop(&out));
+  TEST_ASSERT_TRUE(q.push(c));
+}
+
+void test_coalesced_push_reports_a_drop_when_it_cannot_coalesce(void) {
+  // The path that was silently dropping. pushCoalesced returned void and threw
+  // away push()'s answer, so a volume command arriving with nothing of its type
+  // pending AND the ring full disappeared with nobody told - the same bug as
+  // submit()'s void signature, one level further down.
+  CommandQueue<4> q;
+  Command n;
+  n.type = CommandType::Next;
+  while (q.push(n)) {
+  }
+  Command v;
+  v.type = CommandType::SetVolume;
+  TEST_ASSERT_FALSE(q.pushCoalesced(v));
+}
+
+void test_coalesced_volume_never_fills_the_queue(void) {
+  // A fast spin must not be able to push out a pending play/pause. Coalescing
+  // replaces the pending entry rather than appending, so forty detents cost
+  // one slot.
+  CommandQueue<4> q;
+  Command v;
+  v.type = CommandType::SetVolume;
+  for (int i = 0; i < 40; ++i) {
+    v.arg = i;
+    TEST_ASSERT_TRUE(q.pushCoalesced(v));
+  }
+  Command other;
+  other.type = CommandType::PlayPause;
+  TEST_ASSERT_TRUE(q.push(other));
+}
+
 // ---------------------------------------------------------------------------
 // Themes and the picker
 // ---------------------------------------------------------------------------
@@ -3871,6 +3933,10 @@ int main(int, char **) {
   RUN_TEST(test_toast_drawn_in_bands_matches_full_frame);
   RUN_TEST(test_toast_stays_inside_the_chord);
   RUN_TEST(test_nowplaying_suppresses_times_for_a_toast);
+  RUN_TEST(test_command_queue_reports_a_drop_rather_than_hiding_it);
+  RUN_TEST(test_command_queue_accepts_again_after_a_pop);
+  RUN_TEST(test_coalesced_push_reports_a_drop_when_it_cannot_coalesce);
+  RUN_TEST(test_coalesced_volume_never_fills_the_queue);
   RUN_TEST(test_every_theme_has_a_name_and_a_distinct_spawn);
   RUN_TEST(test_rain_falls_and_the_others_do_not);
   RUN_TEST(test_rain_does_not_burst_on_the_beat);

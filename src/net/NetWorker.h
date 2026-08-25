@@ -42,7 +42,10 @@ class NetWorker {
   void stop();
 
   // UI side: enqueue a command for the net task to execute.
-  void submit(const Command &in);
+  // True if queued. FALSE means the ring was full and the command was DROPPED -
+  // the caller must say so, because by the time this returns the glyph has
+  // usually already flashed to claim it worked.
+  bool submit(const Command &in);
 
   // UI side: copy the shared state out for rendering.
   AppState snapshot();
