@@ -1,0 +1,74 @@
+name: CI
+
+# The three-target rule from CLAUDE.md, enforced instead of remembered.
+#
+# "Verify all three before committing" was a discipline held in one person's
+# head, and the failure it guards against is specific: device-only code
+# silently breaks the desktop build, because net/, spotify/ and config/ are
+# excluded from the native and test filters. Nothing tells you until you next
+# happen to run the other target.
+
+# Every branch, not just main. The point is to catch a broken target before it
+# is merged, which means the feedback has to arrive while the work is still on
+# a branch.
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The esp32 toolchain is a few hundred MB and never changes between runs.
+      # Keyed on platformio.ini because that is what pins the platform version.
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      # env:native is the ONLY target that links SDL. env:test excludes
+      # platform/desktop/SdlPresent.cpp and carries no -lSDL2, and env:esp32
+      # is a cross build - so neither needs this.
+      #
+      # platformio.ini reads ${sysenv.HOMEBREW_PREFIX} for the include and lib
+      # paths. On Ubuntu that is /usr: libsdl2-dev puts headers in
+      # /usr/include/SDL2, which is exactly the layout the ini expects.
+      - name: Install SDL2
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
+
+      # secrets.h is gitignored and holds durable access to a real Spotify
+      # account, so CI compiles against the tracked template instead. The
+      # template defines all five macros DeviceConfig.cpp reads; the resulting
+      # firmware simply reports config=MISSING and runs visuals only.
+      - name: Provide a secrets stub
+        run: cp src/config/secrets.h.example src/config/secrets.h
+
+      # Tests first: they are the fastest signal and the one most likely to
+      # catch a real regression.
+      - name: Host unit tests
+        env:
+          HOMEBREW_PREFIX: /usr
+        run: pio test -e test
+
+      - name: Desktop build
+        env:
+          HOMEBREW_PREFIX: /usr
+        run: pio run -e native
+
+      - name: Device build
+        env:
+          HOMEBREW_PREFIX: /usr
+        run: pio run -e esp32
