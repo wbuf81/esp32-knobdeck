@@ -37,9 +37,12 @@ PROTOCOL_V = 1
 HOSTS = [h.strip() for h in
          os.environ.get("KNOB_HOST", "knobspotify.local").split(",")
          if h.strip()]
-# Comfortably longer than the device's HOLD_MS, so a held request is answered by
-# the device rather than timed out here.
-TIMEOUT_S = 4.0
+# Longer than the device's HOLD_MS so a held request is answered rather than
+# timed out here - and longer than a COLD mDNS resolve, which measured 6.1s on
+# this network against an earlier 4.0s budget. That mismatch made the very first
+# request after a cache miss fail every time, which then rotated the host and
+# looked like the device being unreachable.
+TIMEOUT_S = 10.0
 BACKOFF_START_S = 1.0
 BACKOFF_MAX_S = 30.0
 # Anything the device sends that is not in HANDLERS is ignored, so a newer
@@ -309,6 +312,7 @@ def parse_response(text):
 
 
 _host_idx = 0
+_announced = False
 
 
 def beat(token):
@@ -323,8 +327,22 @@ def beat(token):
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
             body = r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        # HTTPError is a SUBCLASS of URLError, so the handler below used to
+        # swallow it: an HTTP error was logged as "unreachable" AND rotated the
+        # host, which is exactly wrong - the host answered, it just said no.
+        # That double-logging is why a 404 looked like two separate failures.
+        #
+        # The body is logged because without it a 404 is unattributable, and
+        # this device answers 404 with a line saying what it wants.
+        try:
+            detail = e.read()[:120].decode("utf-8", "replace").strip()
+        except Exception:
+            detail = ""
+        log(f"{host} answered HTTP {e.code}: {detail!r}")
+        raise
     except (urllib.error.URLError, OSError, TimeoutError):
-        # Rotate to the next candidate before propagating, so the caller's
+        # Genuinely unreachable. Rotate before propagating, so the caller's
         # backoff applies once per full pass rather than once per address.
         if len(HOSTS) > 1:
             _host_idx = (_host_idx + 1) % len(HOSTS)
@@ -340,6 +358,11 @@ def beat(token):
     if fields.get("v") != str(PROTOCOL_V):
         log(f"response version {fields.get('v')!r}, ignoring")
         return
+
+    global _announced
+    if not _announced:
+        _announced = True
+        log(f"beating via {host}")
 
     for key, value in fields.items():
         handler = HANDLERS.get(key)

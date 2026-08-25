@@ -484,7 +484,22 @@ void loop() {
            g_hostlink.everHeard() ? "seen" : "never seen");
     }
   }
+  const core::ScreenState bl_was = g_backlight.state();
   g_backlight.update(now, st.pb.is_playing, g_last_input_ms, host_asleep);
+  if (g_backlight.state() != bl_was) {
+    // Logged WITH ITS INPUTS, because "it did not sleep" is unanswerable
+    // otherwise: host_asleep, the idle timer and playback all veto each other
+    // and none of them was visible. Same detector-with-no-response trap as the
+    // rate limit that looked like a hang.
+    static const char *kNames[] = {"BRIGHT", "DIM", "OFF"};
+    LOGF("backlight -> %s (host_asleep=%d idle=%us playing=%d mac_valid=%d "
+         "mac_locked=%d mac_stale=%d)",
+         kNames[static_cast<int>(g_backlight.state())], host_asleep ? 1 : 0,
+         (unsigned)((now - g_last_input_ms) / 1000), st.pb.is_playing ? 1 : 0,
+         g_hostlink.mac().state().valid ? 1 : 0,
+         g_hostlink.mac().state().locked ? 1 : 0,
+         g_hostlink.macStale(now) ? 1 : 0);
+  }
   esp32::panelBacklight(g_backlight.duty());
 
   // Drift back to the player after a spell of nothing.
