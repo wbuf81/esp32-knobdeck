@@ -67,6 +67,10 @@ void HostLink::poll(uint32_t now_ms, bool network_up) {
     // hold instantly, forever.
     const bool expired = static_cast<int32_t>(now_ms - hold_until_ms_) >= 0;
     if (!held.connected()) {
+      // stop() even though the peer has gone: the fd is only released when this
+      // static client is reassigned or stopped, so clearing the flag alone
+      // leaked a descriptor per dropped helper connection.
+      held.stop();
       holding_ = false;
     } else if (mac_.hasPending() || expired) {
       char body[192];
@@ -142,7 +146,11 @@ void HostLink::poll(uint32_t now_ms, bool network_up) {
       want = static_cast<int>(MacLink::MAX_BODY);
     }
 
-    char body[MacLink::MAX_BODY + 1];
+    // Static, not automatic. 513 bytes on the stack of the task that also runs
+    // the whole render loop is a lot to spend for one route, and a stack
+    // overflow here is a panic rather than something the watchdog can catch.
+    // Single-threaded by construction: poll() only ever runs on the UI task.
+    static char body[MacLink::MAX_BODY + 1];
     int got = 0;
     deadline = millis() + 60;
     while (client.connected() && got < want && millis() < deadline) {
@@ -208,38 +216,29 @@ void HostLink::poll(uint32_t now_ms, bool network_up) {
     return;
   }
 
-  bool known = false;
-  if (std::strstr(line, "/locked")) {
-    reported_locked_ = true;
-    known = true;
-  } else if (std::strstr(line, "/awake")) {
-    reported_locked_ = false;
-    known = true;
-  }
-
-  // 200 with an explicit Content-Length, and flushed before the close.
+  // GET /awake and GET /locked are GONE.
   //
-  // This was a bare 204 followed straight by stop(), which curl accepted and
-  // Node's fetch did not - it reported "fetch failed" for a request the device
-  // was answering. Closing the socket immediately after print() can drop the
-  // buffered bytes, and a 204 with no length header gives a strict client
-  // nothing to frame the response with. The heartbeat silently never arrived.
-  if (known) {
-    ever_heard_ = true;
-    last_beat_ms_ = now_ms;
-    client.print(
-        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n"
-        "Connection: close\r\n\r\n");
-  } else {
-    // Anything else is answered plainly rather than ignored, so a person poking
-    // at it with a browser learns what it wants.
-    static const char kBody[] =
-        "GET /awake or /locked, or POST /beat with key=value lines\n";
-    client.printf(
-        "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n"
-        "Content-Length: %u\r\nConnection: close\r\n\r\n%s",
-        (unsigned)(sizeof(kBody) - 1), kBody);
-  }
+  // They were unauthenticated writes to the one piece of state that can black
+  // out the screen, and hostAsleep() checked reported_locked_ FIRST - ahead of
+  // the token-checked MacLink state - so anything on the LAN could darken the
+  // display and outrank the real helper. Verified by curling /locked with no
+  // credentials and watching every render timer go to zero.
+  //
+  // They were kept for a partially-updated setup that could still report sleep
+  // state. The helper now speaks /beat only, so that rationale is gone and what
+  // remained was an unauthenticated write path with no users.
+  //
+  // Answered plainly rather than ignored, so a person poking at it with a
+  // browser learns what it wants. An explicit Content-Length and a flush before
+  // the close: a bare 204 followed straight by stop() was accepted by curl and
+  // REJECTED by Node's fetch, which reported "fetch failed" for a request the
+  // device was answering.
+  static const char kBody[] =
+      "POST /beat with key=value lines and a valid token\n";
+  client.printf(
+      "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n"
+      "Content-Length: %u\r\nConnection: close\r\n\r\n%s",
+      (unsigned)(sizeof(kBody) - 1), kBody);
   client.flush();
   client.stop();
 }

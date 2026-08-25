@@ -57,12 +57,10 @@ class HostLink {
   bool macStale(uint32_t now_ms) const { return mac_.stale(now_ms); }
 
   bool everHeard() const { return ever_heard_; }
-  bool reportedLocked() const { return reported_locked_; }
   uint32_t lastBeatMs() const { return last_beat_ms_; }
 
  private:
   bool ever_heard_ = false;
-  bool reported_locked_ = false;
   uint32_t last_beat_ms_ = 0;
   const char *mdns_name_ = nullptr;
   bool socket_up_ = false;
