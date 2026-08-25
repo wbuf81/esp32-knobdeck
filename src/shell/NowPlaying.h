@@ -37,8 +37,9 @@ class NowPlaying {
   static constexpr int HEART_CY = 78;
   static constexpr int HEART_HALF = 13;
 
-  // Once per frame, before any band.
-  void prepare(const PlaybackState &pb, uint32_t shown_ms);
+  // Once per frame, before any band. `suppress_times` drops the timecode row,
+  // which is where a toast goes instead - see shell::Toast.
+  void prepare(const PlaybackState &pb, uint32_t shown_ms, bool suppress_times);
   // Once per band. Draws only; measures nothing.
   void render(gfx::Surface &s, uint16_t tint) const;
 

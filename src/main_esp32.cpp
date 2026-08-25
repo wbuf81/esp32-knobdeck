@@ -47,6 +47,7 @@
 #include "shell/GestureFlash.h"
 #include "shell/ListView.h"
 #include "shell/NowPlaying.h"
+#include "shell/Toast.h"
 #include "shell/RadialShell.h"
 #include "views/CoverLight.h"
 #include "views/DaisyIdle.h"
@@ -69,6 +70,7 @@ shell::NowPlaying g_nowplaying;
 shell::ListView g_list;
 shell::ConfirmRing g_confirm;
 shell::GestureFlash g_flash;
+shell::Toast g_toast;
 views::DaisyIdle g_dog;
 views::SafeScreen g_safe;
 // Latched at boot from the crash streak. Not re-read per frame: a mode that
@@ -788,8 +790,11 @@ void loop() {
 
   // Measured, truncated and formatted once per frame, not once per band.
   g_flash.prepare(now);
+  // Prepared before NowPlaying, because NowPlaying needs to know whether to
+  // give up the time row for it.
+  g_toast.prepare(st.toast, st.toastActive(now));
   if (g_screen == Screen::Player) {
-    g_nowplaying.prepare(st.pb, shown_progress);
+    g_nowplaying.prepare(st.pb, shown_progress, g_toast.visible());
   } else if (g_screen == Screen::Themes) {
     const int n = fx::ThemePicker::ROWS;
     for (int i = 0; i < n; ++i) g_items[i] = fx::ThemePicker::rowName(i);
@@ -864,6 +869,10 @@ void loop() {
         g_list.render(s, view_tint);
       }
       // Last, so the answer is never behind the thing it is answering about.
+      // Outside the per-screen chain on purpose: "No active device" is just as
+      // real while you are looking at a playlist, and the dog screen suppresses
+      // every other piece of furniture but still owes you an error.
+      g_toast.render(s, view_tint);
       g_flash.render(s, view_tint);
       const uint64_t sh2 = esp_timer_get_time();
       g_shell_us += sh1 - sh0;

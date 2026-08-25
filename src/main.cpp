@@ -151,7 +151,7 @@ int main(int, char **) {
     mod.progress01 = static_cast<float>(sim_ms % 90000) / 90000.0f;
     const uint32_t shown =
         static_cast<uint32_t>(mod.progress01 * fake.duration_ms);
-    nowplaying.prepare(fake, shown);
+    nowplaying.prepare(fake, shown, false);
 
     // A slow drift through the list, so a still frame shows it mid-glide - which
     // is the state the fractional scroll exists to make look right.

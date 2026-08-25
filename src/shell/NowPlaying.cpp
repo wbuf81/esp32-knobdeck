@@ -71,7 +71,8 @@ void fitInto(char *dst, size_t cap, const gfx::GFXfont &f, const char *src,
 
 }  // namespace
 
-void NowPlaying::prepare(const PlaybackState &pb, uint32_t shown_ms) {
+void NowPlaying::prepare(const PlaybackState &pb, uint32_t shown_ms,
+                         bool suppress_times) {
   have_track_ = pb.has_track;
   have_times_ = false;
   // Only claim a saved-state for a track that exists. Carrying the last track's
@@ -109,7 +110,7 @@ void NowPlaying::prepare(const PlaybackState &pb, uint32_t shown_ms) {
     elapsed_x_ = gfx::CX - half;
     remaining_x_ =
         gfx::CX + half - gfx::textWidth(gfx::fontSmall(), remaining_);
-    have_times_ = true;
+    have_times_ = !suppress_times;
   }
 }
 

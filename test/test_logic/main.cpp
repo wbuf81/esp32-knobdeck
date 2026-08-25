@@ -46,6 +46,7 @@
 #include "views/SafeScreen.h"
 #include "shell/ListView.h"
 #include "shell/NowPlaying.h"
+#include "shell/Toast.h"
 #include "shell/RadialShell.h"
 #include "spotify/Library.h"
 #include "gfx/Surface.h"
@@ -2307,7 +2308,7 @@ int heartPixels(bool has_track, bool known, bool liked) {
   pb.liked_known = known;
   pb.liked = liked;
   shell::NowPlaying np;
-  np.prepare(pb, 0);
+  np.prepare(pb, 0, false);
   gfx::Surface s = fullSurface(fb);
   np.render(s, 0x07FF);
   // Only the band the heart lives in, so title and artist text cannot be
@@ -2827,6 +2828,130 @@ void test_safe_screen_survives_a_null_reason(void) {
   gfx::Surface surf = fullSurface(fb);
   s.renderBand(surf);
   TEST_ASSERT_TRUE(true);  // reaching here without a crash is the assertion
+}
+
+
+// ---------------------------------------------------------------------------
+// Toast
+// ---------------------------------------------------------------------------
+
+void test_toast_draws_nothing_when_inactive(void) {
+  // The field stays non-empty long after the deadline passes - showToast never
+  // clears the text, only the Deadline. Drawing on text alone would leave the
+  // last error on screen forever.
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  shell::Toast t;
+  t.prepare("No active device", false);
+  TEST_ASSERT_FALSE(t.visible());
+  gfx::Surface s = fullSurface(fb);
+  t.render(s, 0x07E0);
+  int ink = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (fb.at(x, y) != 0x0000) ++ink;
+  TEST_ASSERT_EQUAL_INT(0, ink);
+}
+
+void test_toast_draws_when_active(void) {
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  shell::Toast t;
+  t.prepare("No active device", true);
+  TEST_ASSERT_TRUE(t.visible());
+  gfx::Surface s = fullSurface(fb);
+  t.render(s, 0x07E0);
+  int ink = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (fb.at(x, y) != 0x0000) ++ink;
+  TEST_ASSERT_TRUE(ink > 100);
+}
+
+void test_toast_is_not_visible_for_an_empty_message(void) {
+  shell::Toast t;
+  t.prepare("", true);
+  TEST_ASSERT_FALSE(t.visible());
+  t.prepare(nullptr, true);
+  TEST_ASSERT_FALSE(t.visible());
+}
+
+void test_toast_drawn_in_bands_matches_full_frame(void) {
+  gfx::Framebuffer whole, banded;
+  whole.fill(0x0000);
+  banded.fill(0x0000);
+  shell::Toast a, b;
+  a.prepare("Volume not supported", true);
+  b.prepare("Volume not supported", true);
+  gfx::Surface s = fullSurface(whole);
+  a.render(s, 0x07E0);
+  for (int y = 0; y < gfx::H; y += 20) {
+    gfx::Surface bs;
+    bs.px = banded.pixels() + static_cast<size_t>(y) * gfx::W;
+    bs.w = gfx::W;
+    bs.h = 20;
+    bs.y0 = y;
+    b.render(bs, 0x07E0);
+  }
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (whole.at(x, y) != banded.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+void test_toast_stays_inside_the_chord(void) {
+  // Text is measured against the CHORD at its baseline, not the 360px panel.
+  // A message that overflowed would run under the bezel, where it cannot be
+  // read - which is the same as not showing it.
+  gfx::Framebuffer fb;
+  fb.fill(0x0000);
+  shell::Toast t;
+  t.prepare("a spotify error message far too long for a round screen", true);
+  gfx::Surface s = fullSurface(fb);
+  t.render(s, 0xFFFF);
+  const int half = gfx::halfChordAt(shell::NowPlaying::TIME_BASELINE,
+                                    shell::NowPlaying::MARGIN);
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (fb.at(x, y) != 0x0000) {
+        TEST_ASSERT_TRUE(x >= gfx::CX - half - 1);
+        TEST_ASSERT_TRUE(x <= gfx::CX + half + 1);
+      }
+}
+
+void test_nowplaying_suppresses_times_for_a_toast(void) {
+  // The toast takes the time row's place rather than overlapping it. Two
+  // strings on one baseline is unreadable, and between a timecode you can
+  // infer and an error you cannot, the error wins.
+  PlaybackState pb;
+  pb.has_track = true;
+  pb.duration_ms = 200000;
+  pb.progress_ms = 60000;
+  setStr(pb.title, sizeof(pb.title), "Title");
+  setStr(pb.artist, sizeof(pb.artist), "Artist");
+
+  gfx::Framebuffer with_times, without;
+  with_times.fill(0x0000);
+  without.fill(0x0000);
+
+  shell::NowPlaying a, b;
+  a.prepare(pb, 60000, false);
+  b.prepare(pb, 60000, true);
+  gfx::Surface sa = fullSurface(with_times);
+  gfx::Surface sb = fullSurface(without);
+  a.render(sa, 0x07E0);
+  b.render(sb, 0x07E0);
+
+  int ink_a = 0, ink_b = 0;
+  for (int y = shell::NowPlaying::TIME_BASELINE - 14;
+       y <= shell::NowPlaying::TIME_BASELINE + 2; ++y)
+    for (int x = 0; x < gfx::W; ++x) {
+      if (with_times.at(x, y) != 0x0000) ++ink_a;
+      if (without.at(x, y) != 0x0000) ++ink_b;
+    }
+  TEST_ASSERT_TRUE(ink_a > 20);
+  TEST_ASSERT_EQUAL_INT(0, ink_b);
 }
 
 // ---------------------------------------------------------------------------
@@ -3740,6 +3865,12 @@ int main(int, char **) {
   RUN_TEST(test_safe_screen_drawn_in_bands_matches_full_frame);
   RUN_TEST(test_safe_screen_draws_something_legible);
   RUN_TEST(test_safe_screen_survives_a_null_reason);
+  RUN_TEST(test_toast_draws_nothing_when_inactive);
+  RUN_TEST(test_toast_draws_when_active);
+  RUN_TEST(test_toast_is_not_visible_for_an_empty_message);
+  RUN_TEST(test_toast_drawn_in_bands_matches_full_frame);
+  RUN_TEST(test_toast_stays_inside_the_chord);
+  RUN_TEST(test_nowplaying_suppresses_times_for_a_toast);
   RUN_TEST(test_every_theme_has_a_name_and_a_distinct_spawn);
   RUN_TEST(test_rain_falls_and_the_others_do_not);
   RUN_TEST(test_rain_does_not_burst_on_the_beat);
