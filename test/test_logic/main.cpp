@@ -17,6 +17,7 @@
 #include "net/HostLink.h"
 #include "core/CommandQueue.h"
 #include "core/HeapPolicy.h"
+#include "core/RateLimitPolicy.h"
 #include "core/CrashPolicy.h"
 #include "core/Hash.h"
 #include "core/Rng.h"
@@ -3427,6 +3428,51 @@ void test_device_pick_prefers_an_already_active_computer(void) {
   TEST_ASSERT_EQUAL_INT(1, spotify::pickDevice(d, 2));
 }
 
+
+// ---------------------------------------------------------------------------
+// Rate limit policy
+// ---------------------------------------------------------------------------
+
+void test_a_stored_rate_limit_delays_the_first_poll(void) {
+  // The bug this fixes, and it is one I caused: rate_limited_ lives in memory,
+  // so every flash cleared it and the device polled Spotify immediately on
+  // boot - earning a fresh 429 and very likely extending the penalty. Twenty
+  // reflashes in a day is twenty fresh strikes.
+  TEST_ASSERT_TRUE(core::bootRateLimitWaitMs(2328) > 0);
+}
+
+void test_no_stored_limit_means_poll_immediately(void) {
+  // A device that was not limited must not pay a boot penalty.
+  TEST_ASSERT_EQUAL_INT(0, core::bootRateLimitWaitMs(0));
+}
+
+void test_the_boot_wait_is_capped_so_an_expired_limit_is_not_honoured(void) {
+  // There is no wall clock on this board - no NTP anywhere in the project - so
+  // the device cannot know how long it was powered off. Honouring a stored 39
+  // minutes could mean sitting idle long after Spotify had forgiven us.
+  //
+  // So the stored value is a signal to probe SLOWLY, not a duration to serve.
+  // One probe a minute instead of one poll every two seconds, and Spotify's own
+  // answer is the authority on whether the limit still stands.
+  TEST_ASSERT_EQUAL_INT(core::BOOT_PROBE_CAP_MS,
+                        core::bootRateLimitWaitMs(2328));
+  TEST_ASSERT_EQUAL_INT(core::BOOT_PROBE_CAP_MS,
+                        core::bootRateLimitWaitMs(999999));
+}
+
+void test_a_short_stored_limit_is_served_in_full(void) {
+  // Under the cap there is no reason to probe early: the remembered wait is
+  // both trustworthy and cheap to honour.
+  TEST_ASSERT_EQUAL_INT(5000, core::bootRateLimitWaitMs(5));
+}
+
+void test_the_boot_wait_survives_a_garbage_stored_value(void) {
+  // NVS can return anything if the partition is damaged, and a negative wait
+  // must not become an enormous unsigned one.
+  TEST_ASSERT_EQUAL_INT(0, core::bootRateLimitWaitMs(-1));
+  TEST_ASSERT_EQUAL_INT(0, core::bootRateLimitWaitMs(-99999));
+}
+
 // ---------------------------------------------------------------------------
 // Themes and the picker
 // ---------------------------------------------------------------------------
@@ -4377,6 +4423,11 @@ int main(int, char **) {
   RUN_TEST(test_device_pick_falls_back_to_the_first_usable);
   RUN_TEST(test_device_pick_reports_nothing_usable);
   RUN_TEST(test_device_pick_prefers_an_already_active_computer);
+  RUN_TEST(test_a_stored_rate_limit_delays_the_first_poll);
+  RUN_TEST(test_no_stored_limit_means_poll_immediately);
+  RUN_TEST(test_the_boot_wait_is_capped_so_an_expired_limit_is_not_honoured);
+  RUN_TEST(test_a_short_stored_limit_is_served_in_full);
+  RUN_TEST(test_the_boot_wait_survives_a_garbage_stored_value);
   RUN_TEST(test_every_theme_has_a_name_and_a_distinct_spawn);
   RUN_TEST(test_rain_falls_and_the_others_do_not);
   RUN_TEST(test_rain_does_not_burst_on_the_beat);

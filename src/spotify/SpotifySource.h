@@ -79,6 +79,14 @@ class SpotifySource {
   std::string last_liked_track_;
   Deadline next_poll_;
   Deadline rate_limited_;
+  // Restored from NVS on the first step(), not in begin(), because that is
+  // where now_ms lives. See core/RateLimitPolicy.h for why the stored value is
+  // a signal to probe slowly rather than a duration to serve.
+  bool limit_restored_ = false;
+  // Whether NVS currently holds a non-zero wait. Tracked so a successful call
+  // only writes to flash when there is actually something to clear, instead of
+  // an erase cycle per request.
+  bool limit_stored_ = false;
   bool polled_ = false;
 
   // After a skip, poll rapidly until the track actually changes rather than

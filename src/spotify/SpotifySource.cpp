@@ -1,6 +1,9 @@
 #include "SpotifySource.h"
 
+#include <Preferences.h>
+
 #include "DevicePick.h"
+#include "core/RateLimitPolicy.h"
 
 #include <cstring>
 
@@ -133,6 +136,16 @@ bool SpotifySource::call(const char *method, const std::string &url,
   if (resp->status == 429) {
     const long wait = resp->retry_after_s > 0 ? resp->retry_after_s : 5;
     rate_limited_.arm(now_ms, static_cast<uint32_t>(wait) * 1000);
+    // PERSISTED, so a reboot does not clear it and poll immediately. That is
+    // what turned one 429 into twenty today: every flash reset this deadline.
+    {
+      Preferences p;
+      if (p.begin("spot", false)) {
+        p.putInt("rl_wait", static_cast<int32_t>(wait));
+        p.end();
+        limit_stored_ = true;
+      }
+    }
     // LOGGED, which it was not. The only signal used to be a toast, and toasts
     // rendered nowhere until this project wired them up - so a rate limit was
     // completely invisible, and a device that had gone deliberately quiet was
@@ -144,6 +157,18 @@ bool SpotifySource::call(const char *method, const std::string &url,
   }
 
   out->link = LinkStatus::Online;
+  // A call got through, so whatever was remembered is over. Written only when
+  // something is actually stored: an erase cycle per successful request would
+  // be its own slow damage.
+  if (limit_stored_) {
+    Preferences p;
+    if (p.begin("spot", false)) {
+      p.putInt("rl_wait", 0);
+      p.end();
+    }
+    limit_stored_ = false;
+    NETLOG("rate limit cleared from NVS");
+  }
   return true;
 }
 
@@ -856,6 +881,23 @@ void SpotifySource::step(AppState *out, CommandQueue<> *cmds, uint32_t now_ms) {
     }
   }
 
+  if (!limit_restored_) {
+    limit_restored_ = true;
+    Preferences p;
+    if (p.begin("spot", true)) {
+      const int32_t stored = p.getInt("rl_wait", 0);
+      p.end();
+      const uint32_t wait_ms = core::bootRateLimitWaitMs(stored);
+      if (wait_ms > 0) {
+        limit_stored_ = true;
+        rate_limited_.arm(now_ms, wait_ms);
+        NETLOG("was rate limited (%lds remembered); probing in %ums instead of "
+               "polling immediately",
+               (long)stored, (unsigned)wait_ms);
+      }
+    }
+  }
+
   if (rate_limited_.armed()) {
     if (rate_limited_.pending(now_ms)) {
       // Say so periodically. A silent early return here is why a rate-limited
@@ -867,6 +909,20 @@ void SpotifySource::step(AppState *out, CommandQueue<> *cmds, uint32_t now_ms) {
         last_note = now_ms;
         NETLOG("rate limited: skipping polls, %ums left",
                (unsigned)rate_limited_.remainingMs(now_ms));
+      }
+      // Drain the queue with a VISIBLE refusal rather than leaving commands to
+      // pile up behind this gate. The queue is 8 deep and drops silently when
+      // full, so taps were vanishing - which is precisely how this looked like
+      // "it stopped controlling Spotify" rather than "it is waiting".
+      //
+      // Refused rather than attempted: QUOTA_EXCEEDED means the request would
+      // fail anyway, and spending an exhausted quota to find that out again is
+      // the behaviour that dug this hole.
+      {
+        Command dropped;
+        bool any = false;
+        while (cmds->pop(&dropped)) any = true;
+        if (any) out->showToast("Rate limited", now_ms, 2500);
       }
       return;
     }
