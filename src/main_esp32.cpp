@@ -295,6 +295,7 @@ void loop() {
   // slow; none of it is allowed to be stuck.
   esp32::watchdogFeed();
   esp32::noteUptime(millis());
+  esp32::heapTick(millis());
 
   if (g_safe_mode) {
     safeModeFrame();

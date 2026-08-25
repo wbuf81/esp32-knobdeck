@@ -9,6 +9,7 @@
 #include <esp_task_wdt.h>
 
 #include "core/CrashPolicy.h"
+#include "core/HeapPolicy.h"
 
 namespace esp32 {
 namespace {
@@ -175,6 +176,19 @@ void watchdogBegin() {
 
 void watchdogFeed() {
   if (g_wdt_on) esp_task_wdt_reset();
+}
+
+void heapTick(uint32_t now_ms) {
+  static core::HeapWatch watch;
+  // INTERNAL heap specifically. PSRAM is 8 MB and irrelevant here: mbedTLS
+  // takes its handshake buffers from internal SRAM, so a PSRAM figure would
+  // read healthy right up until every request started failing.
+  const size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  if (watch.observe(free_internal)) {
+    Serial.printf(
+        "HEAP LOW: %lu bytes internal free at %lu s - TLS may start failing\n",
+        (unsigned long)free_internal, (unsigned long)(now_ms / 1000));
+  }
 }
 
 }  // namespace esp32

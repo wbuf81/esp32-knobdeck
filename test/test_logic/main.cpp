@@ -16,6 +16,7 @@
 #include "core/Backlight.h"
 #include "net/HostLink.h"
 #include "core/CommandQueue.h"
+#include "core/HeapPolicy.h"
 #include "core/CrashPolicy.h"
 #include "core/Hash.h"
 #include "core/Rng.h"
@@ -3016,6 +3017,48 @@ void test_coalesced_volume_never_fills_the_queue(void) {
   TEST_ASSERT_TRUE(q.push(other));
 }
 
+
+// ---------------------------------------------------------------------------
+// Heap floor
+// ---------------------------------------------------------------------------
+
+void test_heap_watch_is_quiet_while_there_is_room(void) {
+  core::HeapWatch w;
+  TEST_ASSERT_FALSE(w.observe(core::HEAP_FLOOR_BYTES + 1));
+  TEST_ASSERT_FALSE(w.observe(200000));
+}
+
+void test_heap_watch_fires_once_on_crossing(void) {
+  // Once, not every frame. At 126 fps a per-frame warning is a serial flood
+  // that pushes the thing you needed to read off the top of the buffer - and
+  // this project has already learned twice that a diagnostic can be the bug.
+  core::HeapWatch w;
+  TEST_ASSERT_TRUE(w.observe(core::HEAP_FLOOR_BYTES - 1));
+  TEST_ASSERT_FALSE(w.observe(core::HEAP_FLOOR_BYTES - 1));
+  TEST_ASSERT_FALSE(w.observe(1000));
+}
+
+void test_heap_watch_rearms_only_after_real_recovery(void) {
+  // Hysteresis. Rearming at the floor itself would make a value hovering on the
+  // boundary fire on alternate frames, which is the flood again.
+  core::HeapWatch w;
+  TEST_ASSERT_TRUE(w.observe(core::HEAP_FLOOR_BYTES - 1));
+  TEST_ASSERT_FALSE(w.observe(core::HEAP_FLOOR_BYTES + 1));
+  TEST_ASSERT_FALSE(w.observe(core::HEAP_FLOOR_BYTES - 1));
+  TEST_ASSERT_FALSE(w.observe(core::HEAP_CLEAR_BYTES));
+  TEST_ASSERT_TRUE(w.observe(core::HEAP_FLOOR_BYTES - 1));
+}
+
+void test_the_heap_floor_leaves_room_for_a_tls_handshake(void) {
+  // Measured on this board: free INTERNAL heap sits at 48-51 KB during playback
+  // with artwork decoded, and around 104 KB before the first cover lands. The
+  // floor has to be below the working range or it never stops firing, and above
+  // what a handshake needs or it never fires in time to mean anything.
+  TEST_ASSERT_TRUE(core::HEAP_FLOOR_BYTES < 48000);
+  TEST_ASSERT_TRUE(core::HEAP_FLOOR_BYTES > 16000);
+  TEST_ASSERT_TRUE(core::HEAP_CLEAR_BYTES > core::HEAP_FLOOR_BYTES);
+}
+
 // ---------------------------------------------------------------------------
 // Themes and the picker
 // ---------------------------------------------------------------------------
@@ -3937,6 +3980,10 @@ int main(int, char **) {
   RUN_TEST(test_command_queue_accepts_again_after_a_pop);
   RUN_TEST(test_coalesced_push_reports_a_drop_when_it_cannot_coalesce);
   RUN_TEST(test_coalesced_volume_never_fills_the_queue);
+  RUN_TEST(test_heap_watch_is_quiet_while_there_is_room);
+  RUN_TEST(test_heap_watch_fires_once_on_crossing);
+  RUN_TEST(test_heap_watch_rearms_only_after_real_recovery);
+  RUN_TEST(test_the_heap_floor_leaves_room_for_a_tls_handshake);
   RUN_TEST(test_every_theme_has_a_name_and_a_distinct_spawn);
   RUN_TEST(test_rain_falls_and_the_others_do_not);
   RUN_TEST(test_rain_does_not_burst_on_the_beat);

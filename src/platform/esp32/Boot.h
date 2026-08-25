@@ -56,4 +56,9 @@ void noteUptime(uint32_t now_ms);
 void watchdogBegin();
 void watchdogFeed();
 
+// Call once per loop. Watches free INTERNAL heap and shouts once if it falls
+// below the level where TLS handshakes start failing. See core/HeapPolicy.h;
+// this is the heapTick() the deleted Diag.h declared and never had.
+void heapTick(uint32_t now_ms);
+
 }  // namespace esp32
