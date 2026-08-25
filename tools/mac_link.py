@@ -172,20 +172,30 @@ def audio_and_playback():
     }
 
 
+_last_locked = None
+
+
 def screen_locked():
     """True when the screen is locked.
 
-    Read from IOConsoleLocked on the IORegistry Root node, which was verified
-    present on this machine. The obvious route - Quartz's
-    CGSessionCopyCurrentDictionary - is NOT available: the system python is 3.9
-    and has no Quartz module, and adding a pip dependency to something that runs
-    at login is not worth it.
+    Checks TWO keys and takes either as locked, because I could not verify which
+    one actually flips without locking the machine:
 
-    Reports UNLOCKED when it cannot tell, matching the device's fail-open
-    stance. A broken reader must never leave the screen dark with no way back -
-    HostLink's header records that getting this backwards would mean a dead
-    helper permanently bricks the display.
+      CGSSessionScreenIsLocked - absent entirely while unlocked, which is why a
+        grep for it found nothing and I wrongly concluded it was unavailable.
+      IOConsoleLocked          - present and False while unlocked. Whether it
+        tracks SCREEN lock or console access lock is unclear, so it is treated
+        as a second opinion rather than the answer.
+
+    Quartz's CGSessionCopyCurrentDictionary would settle it, but the system
+    python is 3.9 with no Quartz module and a pip dependency in something that
+    runs at login is not worth it.
+
+    Reports UNLOCKED when it cannot tell, matching HostLink's fail-open stance:
+    its header records that getting this backwards means a dead helper
+    permanently bricks the display.
     """
+    global _last_locked
     # TTL'd: this dumps and parses a sizeable plist, and it was the single most
     # expensive thing in the beat. Lock state does not change fast enough to
     # need reading every second.
@@ -197,22 +207,27 @@ def screen_locked():
     except Exception:
         return False
 
-    def find(o):
-        if isinstance(o, dict):
-            if "IOConsoleLocked" in o:
-                return o["IOConsoleLocked"]
-            for v in o.values():
-                r = find(v)
-                if r is not None:
-                    return r
-        elif isinstance(o, list):
-            for i in o:
-                r = find(i)
-                if r is not None:
-                    return r
-        return None
+    found = {"screen": None, "console": None}
 
-    return bool(find(d))
+    def walk(o):
+        if isinstance(o, dict):
+            if "CGSSessionScreenIsLocked" in o and found["screen"] is None:
+                found["screen"] = o["CGSSessionScreenIsLocked"]
+            if "IOConsoleLocked" in o and found["console"] is None:
+                found["console"] = o["IOConsoleLocked"]
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    walk(d)
+    locked = bool(found["screen"]) or bool(found["console"])
+    if locked != _last_locked:
+        _last_locked = locked
+        log(f"screen {'LOCKED' if locked else 'unlocked'} "
+            f"(screenIsLocked={found['screen']!r} consoleLocked={found['console']!r})")
+    return locked
 
 
 def set_output_volume(pct):

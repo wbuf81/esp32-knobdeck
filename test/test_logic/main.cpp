@@ -3566,6 +3566,24 @@ void test_maclink_rejects_a_bad_token_and_applies_nothing(void) {
   TEST_ASSERT_EQUAL_INT(50, ml.state().out_vol);
 }
 
+
+void test_maclink_rejects_a_token_of_the_right_length_but_wrong_bytes(void) {
+  // The constant-time compare must still be CORRECT, not just uniform. A
+  // same-length near-miss is the case a sloppy loop gets wrong.
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  TEST_ASSERT_FALSE(ml.applyBeat("v=1\ntok=s3crea\nlocked=1\n", 1000));
+  TEST_ASSERT_FALSE(ml.state().valid);
+  // And a prefix of the real token, which differs only in length.
+  TEST_ASSERT_FALSE(ml.applyBeat("v=1\ntok=s3cre\nlocked=1\n", 1000));
+  TEST_ASSERT_FALSE(ml.state().valid);
+  // And a superstring.
+  TEST_ASSERT_FALSE(ml.applyBeat("v=1\ntok=s3cretx\nlocked=1\n", 1000));
+  TEST_ASSERT_FALSE(ml.state().valid);
+  // The real one still works.
+  TEST_ASSERT_TRUE(ml.applyBeat("v=1\ntok=s3cret\nlocked=1\n", 1000));
+}
+
 void test_maclink_rejects_a_bad_version(void) {
   net::MacLink ml;
   ml.setToken("s3cret");
@@ -4690,6 +4708,7 @@ int main(int, char **) {
   RUN_TEST(test_the_boot_wait_survives_a_garbage_stored_value);
   RUN_TEST(test_maclink_applies_a_good_beat);
   RUN_TEST(test_maclink_rejects_a_bad_token_and_applies_nothing);
+  RUN_TEST(test_maclink_rejects_a_token_of_the_right_length_but_wrong_bytes);
   RUN_TEST(test_maclink_rejects_a_bad_version);
   RUN_TEST(test_maclink_ignores_unknown_keys);
   RUN_TEST(test_maclink_missing_volume_reads_as_unknown);

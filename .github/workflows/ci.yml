@@ -58,6 +58,12 @@ jobs:
 
       # Tests first: they are the fastest signal and the one most likely to
       # catch a real regression.
+      # The Mac helper. Its tests are pure - no device, no network, no
+      # osascript - so they run anywhere, and it was the only part of this
+      # project with no coverage at all.
+      - name: Mac helper tests
+        run: python3 -m unittest discover -s tools -p 'test_*.py' -v
+
       - name: Host unit tests
         env:
           HOMEBREW_PREFIX: /usr

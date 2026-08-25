@@ -52,6 +52,20 @@ void copyIfPresent(const char *body, const char *key, char *dst, size_t cap) {
   if (field(body, key, &v, &n)) copyField(dst, cap, v, n);
 }
 
+// Compares in CONSTANT TIME with respect to how much of the token matches.
+//
+// strncmp returns at the first differing byte, so how long it takes leaks how
+// many leading bytes were right. On a LAN, against a 32-byte token, that is a
+// thin channel - but it is a thin channel guarding something that ends in
+// osascript on someone's laptop, and the fix is four lines.
+bool tokenEqual(const char *a, const char *b, size_t n) {
+  unsigned char diff = 0;
+  for (size_t i = 0; i < n; ++i) {
+    diff |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
+  }
+  return diff == 0;
+}
+
 }  // namespace
 
 void MacLink::setToken(const char *tok) {
@@ -75,7 +89,7 @@ bool MacLink::applyBeat(const char *body, uint32_t now_ms) {
   if (token_[0] == '\0') return false;
   if (!field(body, "tok", &tv, &tn)) return false;
   if (tn != std::strlen(token_)) return false;
-  if (std::strncmp(tv, token_, tn) != 0) return false;
+  if (!tokenEqual(tv, token_, tn)) return false;
 
   // Past the gate: now it is safe to apply.
   state_.locked = fieldInt(body, "locked", 0) != 0;
