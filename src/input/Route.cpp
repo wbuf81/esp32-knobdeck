@@ -22,7 +22,17 @@ Action routePlayer(Gesture g, const PlaybackState &pb) {
         a.poke_dog = true;
         a.dog = views::DaisyIdle::Reaction::Touch;
       }
-      if (!transport) return a;
+      if (!transport) {
+        // Nothing is listening, which usually means a computer with Spotify
+        // open that Connect has deregistered. Ask for it back rather than
+        // leaving the tap as decoration.
+        //
+        // No glyph and no optimistic flip: there is no transport to predict the
+        // state of yet. Daisy is the feedback until the request lands, and the
+        // player view appearing is the confirmation.
+        a.command = CommandType::WakeDevice;
+        return a;
+      }
       a.flip_playing = true;
       a.command = CommandType::PlayPause;
       // The glyph shows the state you are NOW IN, not the button you pressed -

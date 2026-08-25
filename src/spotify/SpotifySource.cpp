@@ -1,5 +1,7 @@
 #include "SpotifySource.h"
 
+#include "DevicePick.h"
+
 #include <cstring>
 
 // How large a cover to ask Spotify for.
@@ -195,6 +197,9 @@ void SpotifySource::runCommand(const Command &c, AppState *out,
       return;
     case CommandType::PlayQueueItem:
       playQueueItem(c, out, now_ms);
+      return;
+    case CommandType::WakeDevice:
+      wakeDevice(out, now_ms);
       return;
     case CommandType::PlayFromContext: {
       url = std::string(API) + "/me/player/play";
@@ -586,6 +591,89 @@ void SpotifySource::fetchQueue(AppState *out, uint32_t now_ms) {
 // It works every time and destroys the queue every time - everything below the
 // track you picked is gone and Spotify drops into autoplay radio when it ends.
 // A jump that silently discards the rest of your queue is not a jump.
+void SpotifySource::wakeDevice(AppState *out, uint32_t now_ms) {
+  HttpResponse resp;
+  if (!call("GET", std::string(API) + "/me/player/devices", "", &resp, out,
+            now_ms)) {
+    return;
+  }
+  if (resp.status != 200) {
+    NETLOG("wake: /me/player/devices -> %d", resp.status);
+    out->showToast("Cannot list devices", now_ms);
+    return;
+  }
+
+  // Only the fields the choice needs. The full payload carries volume and
+  // supports_volume per device, and this board has no reason to buffer them.
+  // [0] applies the filter to EVERY element of the array - the same form
+  // buildPlayerFilter uses for artists and images, rather than a second idiom
+  // for the same job.
+  JsonDocument filter;
+  filter["devices"][0]["id"] = true;
+  filter["devices"][0]["name"] = true;
+  filter["devices"][0]["type"] = true;
+  filter["devices"][0]["is_active"] = true;
+  filter["devices"][0]["is_restricted"] = true;
+
+  JsonDocument doc;
+  if (deserializeJson(doc, resp.body,
+                      DeserializationOption::Filter(filter)) !=
+      DeserializationError::Ok) {
+    out->showToast("Bad response", now_ms);
+    return;
+  }
+
+  spotify::DeviceInfo found[8];
+  int n = 0;
+  for (JsonObjectConst d : doc["devices"].as<JsonArrayConst>()) {
+    if (n >= 8) break;
+    setStr(found[n].id, sizeof(found[n].id), d["id"] | "");
+    setStr(found[n].name, sizeof(found[n].name), d["name"] | "");
+    setStr(found[n].type, sizeof(found[n].type), d["type"] | "");
+    found[n].is_active = d["is_active"] | false;
+    found[n].is_restricted = d["is_restricted"] | false;
+    if (found[n].id[0] == '\0') continue;  // unusable without an id
+    ++n;
+  }
+  NETLOG("wake: %d device(s) known", n);
+  for (int i = 0; i < n; ++i) {
+    NETLOG("wake:   %s (%s)%s%s", found[i].name, found[i].type,
+           found[i].is_active ? " active" : "",
+           found[i].is_restricted ? " RESTRICTED" : "");
+  }
+
+  const int pick = spotify::pickDevice(found, n);
+  if (pick < 0) {
+    // The honest answer. Spotify fully quit does not appear in this list at
+    // all, and there is nothing the device can do about that.
+    out->showToast("No devices found", now_ms);
+    return;
+  }
+  NETLOG("wake: transferring to %s", found[pick].name);
+
+  // play:true makes this the transfer AND the resume, which is why waking is
+  // two requests rather than three.
+  char body[128];
+  std::snprintf(body, sizeof(body),
+                "{\"device_ids\":[\"%s\"],\"play\":true}", found[pick].id);
+  HttpResponse tr;
+  if (!call("PUT", std::string(API) + "/me/player", body, &tr, out, now_ms)) {
+    return;
+  }
+  if (tr.status >= 200 && tr.status < 300) {
+    out->pb.has_device = true;
+    // Poll again almost immediately: the whole point is that the player view
+    // replaces the dog promptly rather than at the idle cadence.
+    next_poll_.arm(now_ms, 250);
+    NETLOG("wake: transfer accepted");
+    return;
+  }
+  NETLOG("wake: transfer -> %d", tr.status);
+  if (tr.status == 404) out->showToast("Device gone", now_ms);
+  else if (tr.status == 403) out->showToast("Not allowed", now_ms);
+  else out->showToast("Wake failed", now_ms);
+}
+
 void SpotifySource::playQueueItem(const Command &c, AppState *out,
                                   uint32_t now_ms) {
   if (c.uri[0] == '\0') return;

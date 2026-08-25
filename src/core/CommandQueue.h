@@ -26,6 +26,11 @@ enum class CommandType : uint8_t {
   // task needs both: the uri for the one-shot context jump, and the row count
   // for the skip-forward fallback when that is refused.
   PlayQueueItem,
+  // Ask Spotify to hand playback back to a device it has quietly deregistered.
+  // The common case is a computer with Spotify open but idle: /me/player then
+  // answers 204, every transport command 404s NO_ACTIVE_DEVICE, and the only
+  // way back is to transfer playback onto it explicitly.
+  WakeDevice,
 };
 
 struct Command {

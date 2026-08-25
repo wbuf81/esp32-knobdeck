@@ -42,6 +42,7 @@
 #include "gfx/fonts/Fonts.h"
 #include "input/Gesture.h"
 #include "input/Route.h"
+#include "spotify/DevicePick.h"
 #include "shell/ConfirmRing.h"
 #include "shell/GestureFlash.h"
 #include "shell/Glyphs.h"
@@ -3091,14 +3092,31 @@ void test_tap_with_a_track_sends_playpause_and_flashes(void) {
   TEST_ASSERT_EQUAL(input::Screen::Player, a.screen);
 }
 
-void test_tap_with_nothing_listening_is_the_dog_alone(void) {
+void test_tap_with_nothing_listening_tries_to_wake_a_device(void) {
+  // Deliberately replaces the old dog-alone behaviour. "Nothing listening" is
+  // usually a computer with Spotify open that Spotify Connect has quietly
+  // deregistered, and a tap is the natural way to ask for it back.
+  //
+  // No glyph, though, and no optimistic flip: there is genuinely no transport
+  // yet, so a play icon would be predicting a success that has not happened.
+  // Daisy is the instant feedback while the request flies.
   const input::Action a =
       input::routePlayer(input::Gesture::Tap, nothingListening());
-  TEST_ASSERT_EQUAL(CommandType::None, a.command);
+  TEST_ASSERT_EQUAL(CommandType::WakeDevice, a.command);
   TEST_ASSERT_FALSE(a.show_glyph);
   TEST_ASSERT_FALSE(a.flip_playing);
   TEST_ASSERT_TRUE(a.poke_dog);
   TEST_ASSERT_EQUAL(views::DaisyIdle::Reaction::Touch, a.dog);
+}
+
+void test_tap_does_not_try_to_wake_a_device_that_is_already_there(void) {
+  // has_device true means something IS listening, so a wake would be a
+  // pointless round trip and a transfer away from wherever you are playing.
+  PlaybackState pb;
+  pb.has_track = false;
+  pb.has_device = true;
+  const input::Action a = input::routePlayer(input::Gesture::Tap, pb);
+  TEST_ASSERT_EQUAL(CommandType::PlayPause, a.command);
 }
 
 void test_swipe_down_with_a_track_opens_the_queue(void) {
@@ -3350,6 +3368,63 @@ void test_record_owns_the_backdrop_like_the_other_two(void) {
 
 void test_record_has_a_name(void) {
   TEST_ASSERT_TRUE(fx::themeName(fx::ThemeId::Record)[0] != '?');
+}
+
+
+// ---------------------------------------------------------------------------
+// Device pick
+// ---------------------------------------------------------------------------
+
+void test_device_pick_prefers_a_computer(void) {
+  // "I know I have Spotify open on my computer" is the whole reason this
+  // feature exists, so matching that intent beats taking whatever is first.
+  spotify::DeviceInfo d[3];
+  setStr(d[0].type, sizeof(d[0].type), "Smartphone");
+  setStr(d[1].type, sizeof(d[1].type), "Computer");
+  setStr(d[2].type, sizeof(d[2].type), "Speaker");
+  TEST_ASSERT_EQUAL_INT(1, spotify::pickDevice(d, 3));
+}
+
+void test_device_pick_skips_restricted_devices(void) {
+  // is_restricted is Spotify's own flag for a device that refuses Web API
+  // commands. Transferring to one is a guaranteed failure, so a restricted
+  // computer loses to a usable phone.
+  spotify::DeviceInfo d[2];
+  setStr(d[0].type, sizeof(d[0].type), "Computer");
+  d[0].is_restricted = true;
+  setStr(d[1].type, sizeof(d[1].type), "Smartphone");
+  TEST_ASSERT_EQUAL_INT(1, spotify::pickDevice(d, 2));
+}
+
+void test_device_pick_falls_back_to_the_first_usable(void) {
+  spotify::DeviceInfo d[2];
+  setStr(d[0].type, sizeof(d[0].type), "Speaker");
+  setStr(d[1].type, sizeof(d[1].type), "TV");
+  TEST_ASSERT_EQUAL_INT(0, spotify::pickDevice(d, 2));
+}
+
+void test_device_pick_reports_nothing_usable(void) {
+  // -1, not 0. Returning an index into a list with no usable entry would
+  // transfer playback to a device known to refuse it, and the honest answer on
+  // screen is "no devices found".
+  spotify::DeviceInfo d[2];
+  setStr(d[0].type, sizeof(d[0].type), "Computer");
+  d[0].is_restricted = true;
+  setStr(d[1].type, sizeof(d[1].type), "Speaker");
+  d[1].is_restricted = true;
+  TEST_ASSERT_EQUAL_INT(-1, spotify::pickDevice(d, 2));
+  TEST_ASSERT_EQUAL_INT(-1, spotify::pickDevice(d, 0));
+  TEST_ASSERT_EQUAL_INT(-1, spotify::pickDevice(nullptr, 3));
+}
+
+void test_device_pick_prefers_an_already_active_computer(void) {
+  // If one is somehow already active, it is the one that will accept a resume
+  // without a transfer round trip.
+  spotify::DeviceInfo d[2];
+  setStr(d[0].type, sizeof(d[0].type), "Computer");
+  setStr(d[1].type, sizeof(d[1].type), "Computer");
+  d[1].is_active = true;
+  TEST_ASSERT_EQUAL_INT(1, spotify::pickDevice(d, 2));
 }
 
 // ---------------------------------------------------------------------------
@@ -4278,7 +4353,8 @@ int main(int, char **) {
   RUN_TEST(test_heap_watch_rearms_only_after_real_recovery);
   RUN_TEST(test_the_heap_floor_leaves_room_for_a_tls_handshake);
   RUN_TEST(test_tap_with_a_track_sends_playpause_and_flashes);
-  RUN_TEST(test_tap_with_nothing_listening_is_the_dog_alone);
+  RUN_TEST(test_tap_with_nothing_listening_tries_to_wake_a_device);
+  RUN_TEST(test_tap_does_not_try_to_wake_a_device_that_is_already_there);
   RUN_TEST(test_swipe_down_with_a_track_opens_the_queue);
   RUN_TEST(test_swipe_down_with_no_track_is_swallowed);
   RUN_TEST(test_swipe_up_always_reaches_playlists);
@@ -4296,6 +4372,11 @@ int main(int, char **) {
   RUN_TEST(test_record_with_no_cover_invents_nothing);
   RUN_TEST(test_record_owns_the_backdrop_like_the_other_two);
   RUN_TEST(test_record_has_a_name);
+  RUN_TEST(test_device_pick_prefers_a_computer);
+  RUN_TEST(test_device_pick_skips_restricted_devices);
+  RUN_TEST(test_device_pick_falls_back_to_the_first_usable);
+  RUN_TEST(test_device_pick_reports_nothing_usable);
+  RUN_TEST(test_device_pick_prefers_an_already_active_computer);
   RUN_TEST(test_every_theme_has_a_name_and_a_distinct_spawn);
   RUN_TEST(test_rain_falls_and_the_others_do_not);
   RUN_TEST(test_rain_does_not_burst_on_the_beat);

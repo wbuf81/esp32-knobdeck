@@ -68,6 +68,9 @@ class SpotifySource {
                    const char *playlist_name, AppState *out, uint32_t now_ms);
   void fetchQueue(AppState *out, uint32_t now_ms);
   void playQueueItem(const Command &c, AppState *out, uint32_t now_ms);
+  // Two calls: list the devices Spotify still remembers, then transfer playback
+  // onto the best one with play:true, which resumes in the same request.
+  void wakeDevice(AppState *out, uint32_t now_ms);
   void probeLibraryWrite(AppState *out, uint32_t now_ms);
 
   SpotifyAuth auth_;
