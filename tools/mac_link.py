@@ -65,8 +65,11 @@ def read_token():
 def run(args, stdin_text=None):
     """Run a command and return stdout, or None. Never raises."""
     try:
+        # 2s, not 5. The request budget is TIMEOUT_S, and a reader that can
+        # outlast it means the beat is lost rather than late - which is exactly
+        # how the locked-screen bug hid: build_body outran the POST it was for.
         out = subprocess.run(
-            args, capture_output=True, text=True, timeout=5, input=stdin_text
+            args, capture_output=True, text=True, timeout=2, input=stdin_text
         )
         if out.returncode != 0:
             log(f"{args[0]} failed: {out.stderr.strip()[:120]}")
@@ -256,11 +259,37 @@ HANDLERS = {
 
 def build_body(token):
     name = computer_name()
+
+    # Lock state FIRST, and when locked the AppleScript reads are skipped
+    # entirely.
+    #
+    # This is not an optimisation, it is the fix for a real bug. Spotify does not
+    # answer Apple events while the screen is locked - the read hangs for the
+    # whole subprocess timeout. build_body then took longer than the request's
+    # own budget, so the beat carrying locked=1 never got sent, and the device
+    # never learned to sleep. The lock state was being read correctly and then
+    # thrown away.
+    #
+    # Skipping is also just correct: a screen that is about to go dark has no
+    # use for now-playing, and out_vol is reported as unknown rather than
+    # guessed.
+    locked = screen_locked()
+    if locked:
+        fields = [
+            f"v={PROTOCOL_V}",
+            f"tok={token}",
+            "locked=1",
+            f"host={name}",
+            f"sp_device={name}",
+            "out_vol=-1",
+        ]
+        return ("\n".join(fields) + "\n").encode("utf-8")
+
     vol, playback = audio_and_playback()
     fields = [
         f"v={PROTOCOL_V}",
         f"tok={token}",
-        f"locked={1 if screen_locked() else 0}",
+        "locked=0",
         f"host={name}",
         f"sp_device={name}",
         f"out_vol={vol}",

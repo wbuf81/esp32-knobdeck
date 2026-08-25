@@ -126,28 +126,54 @@ class TestBeatVerification(unittest.TestCase):
 
 class TestBuildBody(unittest.TestCase):
     def setUp(self):
-        p1 = mock.patch.object(m, "screen_locked", return_value=True)
-        p2 = mock.patch.object(m, "computer_name", return_value="Wes's Mac")
-        p3 = mock.patch.object(
-            m,
-            "audio_and_playback",
-            return_value=(
-                63,
-                {"sp_playing": "1", "sp_track": "hazy concentration"},
-            ),
+        self.locked = False
+        self.reads = 0
+
+        def fake_audio():
+            self.reads += 1
+            return 63, {"sp_playing": "1", "sp_track": "hazy concentration"}
+
+        p1 = mock.patch.object(
+            m, "screen_locked", side_effect=lambda: self.locked
         )
+        p2 = mock.patch.object(m, "computer_name", return_value="Wes's Mac")
+        p3 = mock.patch.object(m, "audio_and_playback", side_effect=fake_audio)
         for p in (p1, p2, p3):
             p.start()
             self.addCleanup(p.stop)
 
-    def test_carries_the_expected_fields(self):
-        body = m.build_body("s3cret").decode()
-        f = m.parse_response(body)
+    def test_unlocked_carries_the_expected_fields(self):
+        f = m.parse_response(m.build_body("s3cret").decode())
         self.assertEqual(f["v"], "1")
         self.assertEqual(f["tok"], "s3cret")
-        self.assertEqual(f["locked"], "1")
+        self.assertEqual(f["locked"], "0")
         self.assertEqual(f["out_vol"], "63")
         self.assertEqual(f["sp_track"], "hazy concentration")
+
+    def test_locked_skips_the_applescript_entirely(self):
+        # The fix for a real bug, not an optimisation. Spotify does not answer
+        # Apple events while the screen is locked - the read hangs for the whole
+        # subprocess timeout, build_body outran the request budget, and the beat
+        # carrying locked=1 was never sent. The device therefore never learned to
+        # sleep, even though the lock state had been read correctly.
+        self.locked = True
+        f = m.parse_response(m.build_body("s3cret").decode())
+        self.assertEqual(f["locked"], "1")
+        self.assertEqual(self.reads, 0, "must not touch AppleScript while locked")
+
+    def test_locked_reports_volume_as_unknown_rather_than_guessing(self):
+        # -1, not a stale or invented value. Unknown renders as unknown.
+        self.locked = True
+        f = m.parse_response(m.build_body("s3cret").decode())
+        self.assertEqual(f["out_vol"], "-1")
+
+    def test_locked_still_identifies_the_machine(self):
+        # host and sp_device must survive, or the device forgets which Mac it is
+        # beside and the wake targeting regresses.
+        self.locked = True
+        f = m.parse_response(m.build_body("s3cret").decode())
+        self.assertEqual(f["host"], "Wes's Mac")
+        self.assertEqual(f["sp_device"], "Wes's Mac")
 
     def test_an_apostrophe_and_spaces_survive(self):
         # The reason the wire format is key=value lines and not query params:
