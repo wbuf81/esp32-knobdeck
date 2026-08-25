@@ -20,6 +20,8 @@
 
 #include <cstdint>
 
+#include "net/MacLink.h"
+
 namespace net {
 
 class HostLink {
@@ -46,6 +48,14 @@ class HostLink {
   // locked or it has since gone quiet.
   bool hostAsleep(uint32_t now_ms) const;
 
+  // Passed straight through to the MacLink. Empty disables the command channel.
+  void setMacToken(const char *tok) { mac_.setToken(tok); }
+
+  // The Mac's reported state, and the place to queue a command for it.
+  MacLink &mac() { return mac_; }
+  const MacLink &mac() const { return mac_; }
+  bool macStale(uint32_t now_ms) const { return mac_.stale(now_ms); }
+
   bool everHeard() const { return ever_heard_; }
   bool reportedLocked() const { return reported_locked_; }
   uint32_t lastBeatMs() const { return last_beat_ms_; }
@@ -58,6 +68,13 @@ class HostLink {
   bool socket_up_ = false;
   bool mdns_up_ = false;
   uint32_t next_try_ms_ = 0;
+
+  MacLink mac_;
+  // ONE held client at a time. poll() runs in the render loop, so this is a
+  // deadline check across frames, never a wait inside one. A second client
+  // arriving while this is held is answered immediately with no command.
+  bool holding_ = false;
+  uint32_t hold_until_ms_ = 0;
 
   void tryStart(uint32_t now_ms);
 };

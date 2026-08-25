@@ -157,6 +157,28 @@ void NetWorker::run() {
       continue;
     }
 
+    // WiFi IS associated, so publish that before any HTTP is attempted.
+    //
+    // Without this, LinkStatus only ever became Online inside call() - after a
+    // successful Spotify request - which conflated "the network is up" with
+    // "Spotify answered". HostLink is gated on network_up and has nothing to do
+    // with Spotify, so a device that booted straight into a rate limit never
+    // started its HTTP server at all: it pinged fine and port 80 was closed.
+    //
+    // Latent until the rate limit was made to survive reboots, because every
+    // boot used to poll successfully before anyone looked.
+    //
+    // step() still downgrades this - a 401 to AuthError, a failed request to
+    // Offline - so nothing is being papered over. It is only the floor that
+    // moves: associated means the link is up.
+    {
+      std::lock_guard<std::mutex> lk(mtx_);
+      if (state_.link != LinkStatus::Online) {
+        state_.link = LinkStatus::Online;
+        logLinkChange(LinkStatus::Online);
+      }
+    }
+
     AppState scratch;
     CommandQueue<> local;
     {

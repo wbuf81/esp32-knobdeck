@@ -252,6 +252,11 @@ void setup() {
     // silently failing - which is the distinction the ancestor's notes insist on.
     LOGF("library: %s", g_library.begin() ? "lists in PSRAM" : "ALLOC FAILED");
     g_hostlink.configure(MDNS_NAME);
+    g_hostlink.setMacToken(g_cfg.mac_token.c_str());
+    // Logged, because a silently-disabled command channel is exactly the kind
+    // of thing that wastes an afternoon.
+    LOGF("maclink: command channel %s",
+         g_cfg.mac_token.empty() ? "DISABLED (no token)" : "enabled");
     net.setLibrary(&g_library);
     g_net->start("/sd/art", g_cfg.wifi_ssid.c_str(), g_cfg.wifi_password.c_str());
     LOGF("net: worker started on core 0");
