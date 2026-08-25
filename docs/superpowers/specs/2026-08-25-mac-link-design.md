@@ -303,6 +303,69 @@ held-client mechanics, the real `osascript` calls, and the LaunchAgent.
 running, measured, because "it will not affect your Mac" is a claim and not
 evidence.
 
+
+## Revision: the Mac can answer most of this locally
+
+Added after verifying Spotify's AppleScript interface against the actual machine,
+prompted by the right question — "can it just get everything from my Mac?"
+
+**Measured on this Mac, read-only except one no-op write:**
+
+| Property | Value read |
+|---|---|
+| `player state` | `playing` |
+| `name/artist/album of current track` | `hazy concentration` / `KAESUL` / `Schedule I (Original Soundtrack)` |
+| `player position` / `duration` | 113.2 s / 235690 ms |
+| `spotify url of current track` | `spotify:track:366l6ir20fMXe2KhBxCbb0` |
+| `artwork url of current track` | `i.scdn.co/image/ab67616d0000b273...` (640px variant) |
+| `sound volume` | 100, and `set sound volume` verified working |
+| `shuffling` / `repeating` | `true` / `false` |
+| `output volume of (get volume settings)` | 13 |
+
+That is the entire hot path, locally, with no quota. The `GET /me/player` poll that
+exhausted the quota today — 1800 requests an hour at `POLL_PLAYING_MS=2000` — is
+exactly the call this replaces for free. Artwork was never an API call; it is a
+plain CDN fetch either way.
+
+**What AppleScript cannot give, so the Web API does not go away:**
+
+- Playlist enumeration. It can *play* a URI but not list what you have.
+- The queue / UP NEXT.
+- Liked/saved state — the heart would return to unknown, which is the correct
+  rendering for something we do not know.
+- Device transfer, so the wake feature still needs the API.
+- Anything playing off this Mac. Phone-only or speaker-only playback is invisible
+  to AppleScript.
+
+Every remaining API need is **user-initiated and occasional** rather than a
+polling loop, which is the shape that does not exhaust a quota.
+
+### Consequence for this spec
+
+The channel is unchanged — Tasks 1 through 3 of the plan stand exactly as
+written. What rides on it grows, in three deliberate steps rather than one:
+
+1. **Carry the data.** `MacState` gains playback fields and the helper populates
+   them. Additive, testable, and changes no behaviour.
+2. **Stretch the poll while the Mac link is fresh and agrees.** A cheap quota win
+   that does not touch who owns the truth: if a fresh beat reports the same track
+   playing, the device can poll Spotify far less often because the local data
+   covers the gap.
+3. **Invert the authority** — the Mac becomes the primary source of playback
+   truth, the API the fallback. This is the big one and its own sub-project,
+   because it needs an answer to a question this spec does not have one for:
+   what happens when the two disagree. The Mac saying "playing" while the API
+   reports a different active device is a real state, not an error, and picking
+   the wrong winner would make the screen lie about where the music is.
+
+Step 3 is explicitly NOT in this spec. Steps 1 and 2 are folded into the plan.
+
+### Automation permission
+
+The queries above succeeded from a shell, so this Mac already permits it there.
+The LaunchAgent is a different executable and will likely prompt once on first
+run. Expected, not a fault — but worth knowing before it appears.
+
 ## Open question, deferred
 
 Whether the knob should *display* Mac state (locked, volume) anywhere in this
