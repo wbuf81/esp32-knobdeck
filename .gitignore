@@ -4,5 +4,5 @@
 src/config/secrets.h
 .claude.local.md
 
-# Compiled locally; the Accessibility grant is bound to the path.
-tools/volhud
+# Compiled locally with clang; see tools/knobhud.m.
+tools/knobhud

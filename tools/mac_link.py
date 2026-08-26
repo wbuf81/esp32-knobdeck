@@ -120,59 +120,64 @@ def computer_name():
 
 
 def audio_and_playback():
-    """System volume AND Spotify's now-playing, in ONE osascript call.
+    """System volume, mute state, AND Spotify's now-playing, in ONE osascript.
 
-    Two separate calls meant two process spawns a second for data that arrives
-    from the same interpreter. Both are AppleScript, so both fit in one script.
+    Returns (out_vol, muted, playback_dict). -1 / None / {} when unreadable -
+    the device renders unknown as unknown, and a confident zero would draw an
+    empty slider for a value nobody measured.
 
-    Returns (out_vol, playback_dict). out_vol is -1 when unreadable - never 0,
-    because the device renders unknown as unknown and a confident zero would
-    draw an empty slider for a value nobody measured.
+    The Spotify read is wrapped in a try INSIDE the AppleScript. Spotify running
+    with no current track - stopped state, just launched - errors with -1728
+    "Can't get current track", and before the try that error killed the WHOLE
+    read: the volume went with it, the log gained two lines per beat, and a
+    second osascript was spawned to recover what the first had already known.
     """
     script = (
-        "set ov to output volume of (get volume settings)\n"
-        'if application "Spotify" is not running then return (ov as string) & "\n" & "NORUN"\n'
+        "set vs to (get volume settings)\n"
+        "set ov to output volume of vs\n"
+        "set om to output muted of vs\n"
+        'if application "Spotify" is not running then '
+        'return (ov as string) & "\\n" & (om as string) & "\\n" & "NORUN"\n'
         'tell application "Spotify"\n'
-        "  set s to player state as string\n"
-        "  set t to name of current track\n"
-        "  set a to artist of current track\n"
-        "  set u to spotify url of current track\n"
-        "  set p to player position\n"
-        "  set d to duration of current track\n"
-        '  return (ov as string) & "\n" & s & "\n" & t & "\n" & a & "\n" & u '
-        '& "\n" & p & "\n" & d\n'
+        "  try\n"
+        "    set s to player state as string\n"
+        "    set t to name of current track\n"
+        "    set a to artist of current track\n"
+        "    set u to spotify url of current track\n"
+        "    set p to player position\n"
+        "    set d to duration of current track\n"
+        '    return (ov as string) & "\\n" & (om as string) & "\\n" & s & '
+        '"\\n" & t & "\\n" & a & "\\n" & u & "\\n" & (p as string) & '
+        '"\\n" & (d as string)\n'
+        "  on error\n"
+        '    return (ov as string) & "\\n" & (om as string) & "\\n" & "NORUN"\n'
+        "  end try\n"
         "end tell"
     )
     out = osa(script)
     if not out:
-        # The combined script failed - and folding both reads into one call for
-        # speed also FOLDED THEIR FAILURES together. The volume half needs no
-        # Automation permission (get volume settings is a system call, not an
-        # Apple event to an app), so losing it because Spotify is not authorised
-        # is the optimisation costing more than it saved.
-        #
-        # Fall back to volume alone. One extra spawn, only when the fast path
-        # has already failed.
-        v = osa("output volume of (get volume settings)")
-        try:
-            return max(0, min(100, int(float(v)))), {}
-        except (TypeError, ValueError):
-            return -1, {}
+        return -1, None, {}
     parts = out.split("\n")
     try:
         vol = max(0, min(100, int(float(parts[0]))))
     except (ValueError, IndexError):
         vol = -1
-    if len(parts) < 7 or parts[1] == "NORUN":
-        return vol, {}
-    state, track, artist, uri, pos, dur = parts[1:7]
+    muted = None
+    if len(parts) > 1:
+        if parts[1] == "true":
+            muted = True
+        elif parts[1] == "false":
+            muted = False
+    if len(parts) < 8 or parts[2] == "NORUN":
+        return vol, muted, {}
+    state, track, artist, uri, pos, dur = parts[2:8]
     try:
         # player position is seconds as a float; duration is already ms.
         pos_ms = int(float(pos) * 1000)
         dur_ms = int(float(dur))
     except ValueError:
         pos_ms, dur_ms = -1, -1
-    return vol, {
+    return vol, muted, {
         "sp_playing": "1" if state == "playing" else "0",
         # A newline in a track name would break the line-per-field wire format.
         # Flattened rather than escaped: not worth a parser on the device.
@@ -182,9 +187,6 @@ def audio_and_playback():
         "sp_pos_ms": str(pos_ms),
         "sp_dur_ms": str(dur_ms),
     }
-
-
-_last_locked = None
 
 
 def screen_locked():
@@ -242,13 +244,15 @@ def screen_locked():
     return locked
 
 
-# Built from tools/volhud.m. Posts the real media-key event, which is the only
-# way to get macOS to draw its own volume HUD - see that file for what was
-# measured and ruled out.
-VOLHUD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "volhud")
+# The knob's own overlay, built from tools/knobhud.m. Drawing a window needs no
+# permission, which is the whole reason it replaced volhud: posting synthetic
+# media keys needed an Accessibility grant that BINDS TO THE BINARY'S SIGNATURE,
+# and every rebuild mints a new ad-hoc signature - so rebuilding the tool
+# silently voided its own grant. It worked exactly once, right after the user
+# granted it, and never after the next rebuild.
+KNOBHUD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knobhud")
 
-# macOS moves output volume in sixteenths, so one key step is 6.25 points. Used
-# only for the silent fallback, to turn a click count into a target.
+# macOS moves output volume in sixteenths, so one knob detent is 6.25 points.
 _STEP = 100.0 / 16.0
 
 
@@ -260,69 +264,72 @@ def _read_volume():
         return None
 
 
-# The volume we believe the Mac is at.
+# What we believe the Mac's volume and mute state are.
 #
-# Cached rather than read per adjustment, because reading it was the delay. Each
-# osascript is a process spawn of roughly a tenth of a second, and the previous
-# version did read-press-settle-read-maybe-set: about a second per click, during
-# which further clicks piled up and then applied in a lump. That is what made a
-# slow knob feel like a wild one.
-#
-# It self-corrects for free: every beat already reads the real volume for the
-# body, and that refreshes this. So an estimate can only drift for one beat.
+# Cached rather than read per click, because reading was the delay: each
+# osascript is a process spawn of roughly a tenth of a second, and reading
+# before every adjustment made a slow knob feel like a wild one. The cache
+# self-corrects for free - every beat reads the real values for the body and
+# refreshes it, so an estimate can only drift for one beat.
 _volume = None
+_muted = None
 
-# None = not yet probed, True = confirmed to move the volume, False = inert.
-# Probed ONCE, not per click - the probe is what cost the settle delay.
-_hud_works = None
+_hud_proc = None
+_hud_missing_said = False
 
 
-def note_volume(actual):
-    """Called from the beat with the freshly read volume."""
-    global _volume
+def note_volume(actual, muted=None):
+    """Called from the beat with the freshly read state."""
+    global _volume, _muted
     if actual is not None and actual >= 0:
         _volume = actual
+    if muted is not None:
+        _muted = muted
 
 
-def _probe_hud():
-    """Decide once whether the media-key path actually does anything.
+def _hud_send(line):
+    """Feed the overlay, keeping ONE long-lived process.
 
-    volhud exits 0 even when macOS accepts the event and discards it -
-    AXIsProcessTrusted returns true, the CGEvent converts, the post returns, and
-    nothing moves. So the only honest test is whether the volume changed, and it
-    is worth a settle delay ONCE at startup rather than on every click.
+    A process per click would stack overlapping windows during a fast spin;
+    a persistent child updates one panel in place. Respawned once if it died;
+    absent entirely (not built) it is skipped and said once.
     """
-    global _hud_works
-    if not os.access(VOLHUD, os.X_OK):
-        _hud_works = False
-        log("volhud not built; using silent volume "
-            "(clang -framework Cocoa -o tools/volhud tools/volhud.m)")
+    global _hud_proc, _hud_missing_said
+    if not os.access(KNOBHUD, os.X_OK):
+        if not _hud_missing_said:
+            _hud_missing_said = True
+            log("knobhud not built; volume works but nothing shows on screen "
+                "(clang -framework Cocoa -o tools/knobhud tools/knobhud.m)")
         return
-    before = _read_volume()
-    if before is None:
-        _hud_works = False
-        return
-    # Up then down, so the probe leaves the volume where it found it.
-    run([VOLHUD, "up"])
-    time.sleep(0.25)
-    mid = _read_volume()
-    run([VOLHUD, "down"])
-    _hud_works = mid is not None and mid != before
-    log("volhud moves the volume; using the native HUD" if _hud_works else
-        "volhud posts but nothing moves; using silent volume "
-        "(grant Accessibility to tools/volhud to get the HUD)")
+    for _ in range(2):
+        try:
+            if _hud_proc is None or _hud_proc.poll() is not None:
+                _hud_proc = subprocess.Popen([KNOBHUD], stdin=subprocess.PIPE)
+            _hud_proc.stdin.write((line + "\n").encode("utf-8"))
+            _hud_proc.stdin.flush()
+            return
+        except (OSError, ValueError):
+            try:
+                _hud_proc.kill()
+            except Exception:
+                pass
+            _hud_proc = None
 
 
 def adjust_output_volume(delta):
     """Move the output volume by `delta` clicks.
 
-    A delta, not a target, because macOS's volume keys move in discrete steps
-    and a knob produces discrete detents - so one click is one keypress, and
-    there is no absolute value for the two ends to disagree about.
+    A delta, not a target, because a knob produces discrete detents and macOS
+    steps volume in sixteenths - one maps to the other, and there is no absolute
+    value for the two ends to disagree about.
 
-    Re-clamped and re-typed here rather than trusted. The device is the less
-    trusted end of a channel that terminates in a synthetic keypress, and an
-    allowlist is only as good as its argument checking.
+    ONE osascript per adjustment, computed from the cache. The overlay is
+    notified either way, so cranking against the 0 or 100 stop still shows the
+    panel - silence at the stops read as "broken" in testing, not as "full".
+
+    Re-clamped and re-typed here rather than trusted: the device is the less
+    trusted end of a channel that terminates in a shell-out, and an allowlist
+    is only as good as its argument checking.
     """
     global _volume
     try:
@@ -334,32 +341,20 @@ def adjust_output_volume(delta):
         return
     delta = max(-16, min(16, delta))
 
-    if _hud_works is None:
-        _probe_hud()
-
-    if _hud_works:
-        arg = "up" if delta > 0 else "down"
-        for _ in range(abs(delta)):
-            run([VOLHUD, arg])
-        # Track the estimate so the ring and the fallback stay close; the next
-        # beat corrects it anyway.
-        if _volume is not None:
-            _volume = max(0, min(100, int(round(_volume + delta * _STEP))))
-        log(f"volume {arg} x{abs(delta)}")
-        return
-
-    # Silent path: ONE osascript, from the cached value. No read, no settle.
     if _volume is None:
         _volume = _read_volume()
         if _volume is None:
             log("volume unreadable; nothing done")
             return
+
     target = max(0, min(100, int(round(_volume + delta * _STEP))))
-    if target == _volume:
-        return
-    _volume = target
-    osa(f"set volume output volume {target}")
-    log(f"volume -> {target}")
+    if target != _volume:
+        _volume = target
+        osa(f"set volume output volume {target}")
+        log(f"volume -> {target}")
+    if _muted is not None:
+        _hud_send(f"muted {1 if _muted else 0}")
+    _hud_send(f"volume {_volume}")
 
 
 # Only these keys are ever acted on. Adding a capability means adding an entry
@@ -397,8 +392,8 @@ def build_body(token):
         ]
         return ("\n".join(fields) + "\n").encode("utf-8")
 
-    vol, playback = audio_and_playback()
-    note_volume(vol)
+    vol, muted, playback = audio_and_playback()
+    note_volume(vol, muted)
     fields = [
         f"v={PROTOCOL_V}",
         f"tok={token}",
@@ -407,6 +402,8 @@ def build_body(token):
         f"sp_device={name}",
         f"out_vol={vol}",
     ]
+    if muted is not None:
+        fields.append(f"out_muted={1 if muted else 0}")
     for k, v in playback.items():
         fields.append(f"{k}={v}")
     return ("\n".join(fields) + "\n").encode("utf-8")

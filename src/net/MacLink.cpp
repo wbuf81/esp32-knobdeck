@@ -98,6 +98,10 @@ bool MacLink::applyBeat(const char *body, uint32_t now_ms) {
   if (state_.out_vol > 100) state_.out_vol = 100;
   if (state_.out_vol < -1) state_.out_vol = -1;
 
+  state_.out_muted = fieldInt(body, "out_muted", -1);
+  if (state_.out_muted > 1) state_.out_muted = 1;
+  if (state_.out_muted < -1) state_.out_muted = -1;
+
   copyIfPresent(body, "host", state_.host, sizeof(state_.host));
   copyIfPresent(body, "sp_device", state_.sp_device, sizeof(state_.sp_device));
 

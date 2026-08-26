@@ -3603,6 +3603,22 @@ void test_maclink_ignores_unknown_keys(void) {
   TEST_ASSERT_TRUE(ml.state().locked);
 }
 
+
+void test_maclink_carries_the_mute_state(void) {
+  // Carried for the same reason sp_track is: the knob is growing toward
+  // showing mute/mic state, and the field costs a line now or a protocol
+  // change later. -1 when absent - unknown renders as unknown, and a
+  // confident "not muted" from a helper too old to say would be a lie.
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  TEST_ASSERT_TRUE(ml.applyBeat("v=1\ntok=s3cret\nout_muted=1\n", 1000));
+  TEST_ASSERT_EQUAL_INT(1, ml.state().out_muted);
+  TEST_ASSERT_TRUE(ml.applyBeat("v=1\ntok=s3cret\nout_muted=0\n", 2000));
+  TEST_ASSERT_EQUAL_INT(0, ml.state().out_muted);
+  TEST_ASSERT_TRUE(ml.applyBeat("v=1\ntok=s3cret\nlocked=0\n", 3000));
+  TEST_ASSERT_EQUAL_INT(-1, ml.state().out_muted);
+}
+
 void test_maclink_missing_volume_reads_as_unknown(void) {
   // -1, never 0. A confident zero would draw a full-looking empty slider.
   net::MacLink ml;
@@ -4737,6 +4753,7 @@ int main(int, char **) {
   RUN_TEST(test_maclink_rejects_a_token_of_the_right_length_but_wrong_bytes);
   RUN_TEST(test_maclink_rejects_a_bad_version);
   RUN_TEST(test_maclink_ignores_unknown_keys);
+  RUN_TEST(test_maclink_carries_the_mute_state);
   RUN_TEST(test_maclink_missing_volume_reads_as_unknown);
   RUN_TEST(test_maclink_empty_token_disables_the_command_channel);
   RUN_TEST(test_maclink_accumulates_detents_rather_than_replacing);

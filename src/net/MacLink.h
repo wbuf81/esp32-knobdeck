@@ -37,6 +37,10 @@ struct MacState {
   // -1 means the Mac did not report one. Never coerce to 0 - that would draw a
   // confident empty slider for a value we do not have.
   int out_vol = -1;
+  // -1 unknown, 0 audible, 1 muted. Carried for the mute/mic display the knob
+  // is growing toward; a confident "not muted" from a helper too old to say
+  // would be a lie of exactly the kind unknown-renders-as-unknown forbids.
+  int out_muted = -1;
 
   // Playback, straight from the Mac's own Spotify via AppleScript. Verified
   // available on the real machine, and it costs no API quota - which is the

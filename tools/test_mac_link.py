@@ -41,92 +41,55 @@ class TestParseResponse(unittest.TestCase):
 
 
 class TestVolumeAdjust(unittest.TestCase):
-    """The device is the less trusted end of a channel ending in a keypress."""
-
-    def setUp(self):
-        self.runs = []
-        self.osa = []
-        m._hud_works = True      # probe already done and positive
-        m._volume = 50
-        self.addCleanup(lambda: (setattr(m, "_hud_works", None),
-                                 setattr(m, "_volume", None)))
-        p1 = mock.patch.object(m, "run", side_effect=lambda a, **k: self.runs.append(a))
-        p2 = mock.patch.object(m, "osa", side_effect=lambda s: self.osa.append(s))
-        for p in (p1, p2):
-            p.start()
-            self.addCleanup(p.stop)
-
-    def test_one_detent_is_one_keypress(self):
-        m.adjust_output_volume("1")
-        self.assertEqual(len(self.runs), 1)
-        self.assertEqual(self.runs[0][1], "up")
-
-    def test_three_detents_are_three_keypresses(self):
-        # A delta is a count of clicks, and the HUD steps once per press.
-        m.adjust_output_volume("3")
-        self.assertEqual([r[1] for r in self.runs], ["up", "up", "up"])
-
-    def test_a_negative_delta_presses_down(self):
-        m.adjust_output_volume("-2")
-        self.assertEqual([r[1] for r in self.runs], ["down", "down"])
-
-    def test_zero_does_nothing(self):
-        m.adjust_output_volume("0")
-        self.assertEqual(self.runs, [])
-        self.assertEqual(self.osa, [])
-
-    def test_non_numeric_is_refused_entirely(self):
-        # Not clamped to a default - REFUSED. A garbage argument means the device
-        # is not saying what we think, and guessing a volume from it would be
-        # inventing an instruction.
-        m.adjust_output_volume("; rm -rf /")
-        self.assertEqual(self.runs, [])
-        self.assertEqual(self.osa, [])
-
-    def test_a_float_string_is_refused_rather_than_truncated(self):
-        m.adjust_output_volume("2.9")
-        self.assertEqual(self.runs, [])
-
-    def test_an_absurd_delta_is_clamped(self):
-        # One stuck report must not be able to spin the volume end to end.
-        m.adjust_output_volume("9999")
-        self.assertEqual(len(self.runs), 16)
-
-    def test_the_hud_path_makes_no_osascript_calls_at_all(self):
-        # THE responsiveness requirement. Each osascript is a process spawn of
-        # roughly a tenth of a second; the earlier version did read, press,
-        # settle, read, maybe set - about a second per click, during which more
-        # clicks piled up and applied in a lump. That is what made a slow knob
-        # feel like a wild one.
-        m.adjust_output_volume("2")
-        self.assertEqual(self.osa, [])
-
-
-class TestVolumeAdjustSilent(unittest.TestCase):
-    """No working HUD: one osascript per adjustment, from the cache."""
+    """One osascript per click, and the overlay told either way."""
 
     def setUp(self):
         self.osa = []
-        m._hud_works = False
+        self.hud = []
         m._volume = 50
-        self.addCleanup(lambda: (setattr(m, "_hud_works", None),
-                                 setattr(m, "_volume", None)))
+        m._muted = False
+        self.addCleanup(lambda: (setattr(m, "_volume", None),
+                                 setattr(m, "_muted", None)))
         p1 = mock.patch.object(m, "osa", side_effect=lambda s: self.osa.append(s))
-        p2 = mock.patch.object(m, "run", side_effect=AssertionError("no presses"))
+        p2 = mock.patch.object(m, "_hud_send", side_effect=self.hud.append)
         for p in (p1, p2):
             p.start()
             self.addCleanup(p.stop)
 
     def test_exactly_one_osascript_per_adjustment(self):
-        # Not three. The reads were the delay.
+        # THE responsiveness requirement, as an assertion. Each osascript is a
+        # process spawn of roughly a tenth of a second; the earlier design did
+        # read, press, settle, read, maybe set - about a second per click,
+        # during which more clicks piled up and applied in a lump. That is what
+        # made a slow knob feel like a wild one.
         m.adjust_output_volume("2")
         self.assertEqual(len(self.osa), 1)
         self.assertTrue(self.osa[0].startswith("set volume"))
 
     def test_it_steps_by_sixteenths(self):
-        # macOS moves output volume in sixteenths, so +2 from 50 is about 62.
+        # macOS steps volume in sixteenths, so +2 from 50 is about 62.
         m.adjust_output_volume("2")
         self.assertIn("62", self.osa[0])
+
+    def test_the_overlay_is_shown(self):
+        m.adjust_output_volume("2")
+        self.assertIn("volume 62", self.hud)
+
+    def test_the_overlay_learns_the_mute_state_first(self):
+        # muted before volume, because the volume line is what makes the panel
+        # appear - the state has to be right before it shows.
+        m._muted = True
+        m.adjust_output_volume("1")
+        self.assertEqual(self.hud[0], "muted 1")
+        self.assertTrue(self.hud[1].startswith("volume "))
+
+    def test_cranking_against_the_stop_still_shows_the_overlay(self):
+        # Already at 100: no osascript is spent, but silence at the stops read
+        # as "broken" in testing, not as "full". The panel still appears.
+        m._volume = 100
+        m.adjust_output_volume("3")
+        self.assertEqual([s for s in self.osa if s.startswith("set volume")], [])
+        self.assertIn("volume 100", self.hud)
 
     def test_it_clamps_at_the_top(self):
         m.adjust_output_volume("16")
@@ -137,18 +100,73 @@ class TestVolumeAdjustSilent(unittest.TestCase):
         self.assertIn("0", self.osa[0])
 
     def test_successive_clicks_accumulate_from_the_cache(self):
-        # Without a cached value each click would have to read first, which is
-        # the spawn this design exists to avoid.
         m.adjust_output_volume("1")
         m.adjust_output_volume("1")
         self.assertEqual(len(self.osa), 2)
         self.assertIn("62", self.osa[1])
 
-    def test_a_no_op_target_is_not_sent(self):
-        # Already at the ceiling: do not spend a spawn saying so.
-        m._volume = 100
-        m.adjust_output_volume("1")
+    def test_zero_does_nothing(self):
+        m.adjust_output_volume("0")
         self.assertEqual(self.osa, [])
+        self.assertEqual(self.hud, [])
+
+    def test_non_numeric_is_refused_entirely(self):
+        # Not clamped to a default - REFUSED. A garbage argument means the
+        # device is not saying what we think, and guessing a volume from it
+        # would be inventing an instruction.
+        m.adjust_output_volume("; rm -rf /")
+        self.assertEqual(self.osa, [])
+        self.assertEqual(self.hud, [])
+
+    def test_a_float_string_is_refused_rather_than_truncated(self):
+        m.adjust_output_volume("2.9")
+        self.assertEqual(self.osa, [])
+
+    def test_an_absurd_delta_is_clamped(self):
+        # One stuck report must not spin the volume end to end: +/-16 clicks is
+        # the full range, so the clamp caps a lump at one full sweep.
+        m.adjust_output_volume("9999")
+        self.assertIn("100", self.osa[0])
+
+
+class TestOverlayProcess(unittest.TestCase):
+    """The overlay is ONE long-lived child, respawned once if it died."""
+
+    def setUp(self):
+        m._hud_proc = None
+        m._hud_missing_said = False
+        self.addCleanup(lambda: (setattr(m, "_hud_proc", None),
+                                 setattr(m, "_hud_missing_said", False)))
+
+    def _proc(self, alive=True):
+        proc = mock.MagicMock()
+        proc.poll.return_value = None if alive else 1
+        return proc
+
+    def test_it_spawns_once_and_reuses(self):
+        proc = self._proc()
+        with mock.patch("os.access", return_value=True), \
+             mock.patch.object(m.subprocess, "Popen", return_value=proc) as popen:
+            m._hud_send("volume 10")
+            m._hud_send("volume 20")
+        self.assertEqual(popen.call_count, 1, "one panel, not one per click")
+        self.assertEqual(proc.stdin.write.call_count, 2)
+
+    def test_a_dead_overlay_is_respawned(self):
+        m._hud_proc = self._proc(alive=False)
+        fresh = self._proc()
+        with mock.patch("os.access", return_value=True), \
+             mock.patch.object(m.subprocess, "Popen", return_value=fresh):
+            m._hud_send("volume 10")
+        fresh.stdin.write.assert_called_once()
+
+    def test_a_missing_binary_is_said_once_and_skipped(self):
+        logs = []
+        with mock.patch("os.access", return_value=False), \
+             mock.patch.object(m, "log", side_effect=logs.append):
+            m._hud_send("volume 10")
+            m._hud_send("volume 20")
+        self.assertEqual(len(logs), 1, "nagging every click is churn")
 
 
 class TestVolumeCacheSync(unittest.TestCase):
@@ -159,8 +177,9 @@ class TestVolumeCacheSync(unittest.TestCase):
     def test_the_beat_refreshes_the_cache(self):
         # The estimate can only drift for one beat, because every beat already
         # reads the real volume for the body.
-        m.note_volume(33)
+        m.note_volume(33, muted=True)
         self.assertEqual(m._volume, 33)
+        self.assertIs(m._muted, True)
 
     def test_an_unknown_volume_does_not_poison_the_cache(self):
         # -1 means the Mac did not report one. Caching that would make the next
@@ -324,7 +343,7 @@ class TestBuildBody(unittest.TestCase):
 
         def fake_audio():
             self.reads += 1
-            return 63, {"sp_playing": "1", "sp_track": "hazy concentration"}
+            return 63, False, {"sp_playing": "1", "sp_track": "hazy concentration"}
 
         p1 = mock.patch.object(
             m, "screen_locked", side_effect=lambda: self.locked
@@ -341,6 +360,7 @@ class TestBuildBody(unittest.TestCase):
         self.assertEqual(f["tok"], "s3cret")
         self.assertEqual(f["locked"], "0")
         self.assertEqual(f["out_vol"], "63")
+        self.assertEqual(f["out_muted"], "0")
         self.assertEqual(f["sp_track"], "hazy concentration")
 
     def test_locked_skips_the_applescript_entirely(self):
@@ -405,44 +425,68 @@ class TestPlaybackParsing(unittest.TestCase):
     def test_parses_a_real_reading(self):
         # Values measured off the actual machine.
         out = (
-            "25\nplaying\nhazy concentration\nKAESUL\n"
+            "25\nfalse\nplaying\nhazy concentration\nKAESUL\n"
             "spotify:track:366l6ir20fMXe2KhBxCbb0\n113.206\n235690"
         )
         with self._with_osa(out):
-            vol, pb = m.audio_and_playback()
+            vol, muted, pb = m.audio_and_playback()
         self.assertEqual(vol, 25)
+        self.assertIs(muted, False)
         self.assertEqual(pb["sp_playing"], "1")
         self.assertEqual(pb["sp_artist"], "KAESUL")
         self.assertEqual(pb["sp_pos_ms"], "113206")
         self.assertEqual(pb["sp_dur_ms"], "235690")
 
-    def test_spotify_not_running_still_yields_the_volume(self):
-        # The failure coupling that combining the two reads introduced: a
-        # missing Spotify must not cost the volume, which needs no permission.
-        with self._with_osa("19\nNORUN"):
-            vol, pb = m.audio_and_playback()
+    def test_mute_state_is_carried(self):
+        with self._with_osa("25\ntrue\nNORUN"):
+            vol, muted, pb = m.audio_and_playback()
+        self.assertIs(muted, True)
+
+    def test_spotify_not_running_still_yields_volume_and_mute(self):
+        with self._with_osa("19\nfalse\nNORUN"):
+            vol, muted, pb = m.audio_and_playback()
+        self.assertEqual(vol, 19)
+        self.assertIs(muted, False)
+        self.assertEqual(pb, {})
+
+    def test_the_stopped_state_no_longer_costs_the_volume(self):
+        # Spotify running with NO current track errors with -1728 inside the
+        # tell block. Before the AppleScript-side try, that error killed the
+        # whole read: the volume went with it, the log gained two lines per
+        # beat, and a second osascript was spawned to recover what the first
+        # had already known. The script now returns NORUN itself, so the volume
+        # and mute survive in the SAME spawn.
+        with self._with_osa("19\nfalse\nNORUN"):
+            vol, muted, pb = m.audio_and_playback()
         self.assertEqual(vol, 19)
         self.assertEqual(pb, {})
 
+    def test_the_applescript_carries_its_own_try_block(self):
+        # The fix lives inside the script, so it must actually be in there.
+        import inspect
+        s = inspect.getsource(m.audio_and_playback)
+        self.assertIn("on error", s)
+
     def test_paused_is_reported_as_not_playing(self):
-        out = "10\npaused\nt\na\nspotify:track:x\n1.0\n1000"
+        out = "10\nfalse\npaused\nt\na\nspotify:track:x\n1.0\n1000"
         with self._with_osa(out):
-            _, pb = m.audio_and_playback()
+            _, _, pb = m.audio_and_playback()
         self.assertEqual(pb["sp_playing"], "0")
 
     def test_a_newline_in_a_track_name_is_flattened(self):
-        # Would otherwise forge a field on the wire.
-        out = "10\nplaying\nbad\nname\na\nspotify:track:x\n1.0\n1000"
+        out = "10\nfalse\nplaying\nbad\nname\na\nspotify:track:x\n1.0\n1000"
         with self._with_osa(out):
-            _, pb = m.audio_and_playback()
+            _, _, pb = m.audio_and_playback()
         self.assertNotIn("\n", pb.get("sp_track", ""))
 
     def test_a_total_failure_reads_as_unknown_not_zero(self):
-        # -1, never 0: the device renders unknown as unknown, and a confident
-        # zero would draw an empty slider for a value nobody measured.
+        # -1 and None, never 0 and False: the device renders unknown as
+        # unknown, and a confident zero would draw an empty slider for a value
+        # nobody measured.
         with mock.patch.object(m, "osa", return_value=None):
-            vol, pb = m.audio_and_playback()
+            vol, muted, pb = m.audio_and_playback()
         self.assertEqual(vol, -1)
+        self.assertIsNone(muted)
         self.assertEqual(pb, {})
 
 
