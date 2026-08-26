@@ -53,6 +53,8 @@
 #include "views/CoverLight.h"
 #include "views/DaisyIdle.h"
 #include "views/SafeScreen.h"
+#include "views/TeamsScreen.h"
+#include "core/PendingToggle.h"
 #include "fx/ThemePicker.h"
 #include "config/ThemePref.h"
 
@@ -74,6 +76,19 @@ shell::GestureFlash g_flash;
 shell::Toast g_toast;
 views::DaisyIdle g_dog;
 views::SafeScreen g_safe;
+views::TeamsScreen g_teams;
+// Pending toggles: tapped, awaiting Teams' echo. Cleared when the reported
+// state changes, expired if Teams never answers.
+core::PendingToggle g_mic_pending, g_cam_pending;
+// Where to return when the call ends (or the user swipes out).
+input::Screen g_before_teams = input::Screen::Player;
+uint32_t g_call_started_ms = 0;
+bool g_teams_in_call_prev = false;
+// The manual escape latch: swiping out of the Teams screen mid-call must not
+// be answered by the auto-switch shoving you straight back in. Cleared when
+// the call actually ends.
+bool g_teams_dismissed = false;
+int g_teams_muted_prev = -1, g_teams_cam_prev = -1;
 // Latched at boot from the crash streak. Not re-read per frame: a mode that
 // could change under the render loop is a mode with two code paths live at
 // once, which is how a diagnostic screen ends up half-drawn over an effect.
@@ -512,6 +527,33 @@ void loop() {
     g_net->setPreferredDevice(ms.sp_device);
     g_net->setMacPlaying(fresh && ms.sp_playing, fresh ? ms.sp_uri : "");
   }
+  // Teams call transitions. Enter on the RISING edge only: a manual exit mid-
+  // call stays out (the dismissed latch), because an auto-switch that fights
+  // the person holding the device is worse than none.
+  {
+    const net::MacState &ms = g_hostlink.mac().state();
+    const bool fresh = ms.valid && !g_hostlink.macStale(now);
+    const bool in_call = fresh && ms.teams_in_call == 1;
+    if (in_call && !g_teams_in_call_prev) {
+      if (g_screen != Screen::Teams) g_before_teams = g_screen;
+      g_screen = Screen::Teams;
+      g_teams.begin();
+      g_call_started_ms = now;
+      g_teams_dismissed = false;
+      LOGF("teams: call started, screen switched");
+    } else if (!in_call && g_teams_in_call_prev) {
+      if (g_screen == Screen::Teams) g_screen = g_before_teams;
+      g_teams_dismissed = false;
+      LOGF("teams: call ended, screen restored");
+    }
+    g_teams_in_call_prev = in_call;
+    // Teams' echo IS the confirmation: reported state moved, stop dimming.
+    if (ms.teams_muted != g_teams_muted_prev) g_mic_pending.clear();
+    if (ms.teams_camera != g_teams_cam_prev) g_cam_pending.clear();
+    g_teams_muted_prev = ms.teams_muted;
+    g_teams_cam_prev = ms.teams_camera;
+  }
+
   const bool host_asleep = g_hostlink.hostAsleep(now);
   {
     // Logged on change only, so the reason the screen went dark is in the log
@@ -547,7 +589,11 @@ void loop() {
   // Being stranded in a list is the one state this device cannot explain: there
   // is no visible way back except a gesture you have to remember. It also means
   // the visuals return on their own, which is what the thing is for.
-  if (g_screen != Screen::Player && now - g_last_input_ms > IDLE_RETURN_MS) {
+  // The Teams screen is exempt from the idle drift: fifteen quiet seconds in a
+  // meeting is the normal case, and yanking the mute button away mid-call is
+  // exactly when it would be needed.
+  if (g_screen != Screen::Player && g_screen != Screen::Teams &&
+      now - g_last_input_ms > IDLE_RETURN_MS) {
     g_screen = Screen::Player;
     g_sel = 0;
     g_sel_pos = 0.0f;
@@ -701,6 +747,24 @@ void loop() {
         }
         break;
 
+      case Screen::Teams: {
+        const input::TeamsAction act = input::routeTeams(g, g_gesture.tapX());
+        if (act.toggle_mic) {
+          g_hostlink.mac().requestTeamsToggleMute();
+          g_mic_pending.arm(now);
+          esp32::hapticsClick();
+        } else if (act.toggle_cam) {
+          g_hostlink.mac().requestTeamsToggleCamera();
+          g_cam_pending.arm(now);
+          esp32::hapticsClick();
+        } else if (act.exit_screen) {
+          g_screen = g_before_teams;
+          g_teams_dismissed = true;  // stay out until this call ends
+          esp32::hapticsBump();
+        }
+        break;
+      }
+
       case Screen::Confirm:
         if (g == input::Gesture::Tap) {
           const spotify::Entry *e = g_library.track(g_confirm_row);
@@ -812,6 +876,16 @@ void loop() {
   // Prepared before NowPlaying, because NowPlaying needs to know whether to
   // give up the time row for it.
   g_toast.prepare(st.toast, st.toastActive(now));
+  if (g_screen == Screen::Teams) {
+    const net::MacState &ms = g_hostlink.mac().state();
+    const bool fresh = ms.valid && !g_hostlink.macStale(now);
+    // Stale mid-call renders as UNKNOWN halves, never a confident stale state.
+    g_teams.prepare(fresh ? ms.teams_muted : -1,
+                    fresh ? ms.teams_camera : -1,
+                    g_mic_pending.pending(now), g_cam_pending.pending(now),
+                    fresh ? static_cast<int>((now - g_call_started_ms) / 1000)
+                          : -1);
+  }
   if (g_screen == Screen::Player) {
     g_nowplaying.prepare(st.pb, shown_progress, g_toast.visible());
   } else if (g_screen == Screen::Themes) {
@@ -865,21 +939,23 @@ void loop() {
       s.w = gfx::W;
       s.h = esp32::PANEL_BAND_H;
       s.y0 = y;
-      if (idle_dog) g_dog.renderBand(s);
+      const bool teams_screen = g_screen == Screen::Teams;
+      if (teams_screen) g_teams.renderBand(s);
+      else if (idle_dog) g_dog.renderBand(s);
       else g_view.renderBand(s);
       // The shell draws over the view, in the same band, before it is pushed.
       const uint64_t sh0 = esp_timer_get_time();
       // The dog carries the whole message. A progress ring at zero and a title
       // reading "nothing playing" over the top of her would be the device saying
       // the same thing three times, twice of them in furniture.
-      if (!idle_dog) {
+      if (!idle_dog && !teams_screen) {
         g_shell.render(s, g_mod.progress01, view_tint,
                        g_volume >= 0 ? g_volume : st.pb.volume_pct, now,
                        g_mod.bass);
       }
       const uint64_t sh1 = esp_timer_get_time();
-      if (idle_dog) {
-        // nothing over the dog but the gesture flash
+      if (idle_dog || teams_screen) {
+        // nothing over the dog or the meeting buttons but the flash and toast
       } else if (g_screen == Screen::Player) {
         g_nowplaying.render(s, view_tint);
       } else if (g_screen == Screen::Confirm) {

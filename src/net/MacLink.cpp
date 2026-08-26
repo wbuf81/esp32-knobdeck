@@ -112,9 +112,27 @@ bool MacLink::applyBeat(const char *body, uint32_t now_ms) {
   state_.sp_pos_ms = fieldInt(body, "sp_pos_ms", -1);
   state_.sp_dur_ms = fieldInt(body, "sp_dur_ms", -1);
 
+  auto tri = [&](const char *key) {
+    int v = fieldInt(body, key, -1);
+    return v > 1 ? 1 : (v < -1 ? -1 : v);
+  };
+  state_.teams_in_call = tri("teams_in_call");
+  state_.teams_muted = tri("teams_muted");
+  state_.teams_camera = tri("teams_camera");
+
   state_.valid = true;
   last_beat_ms_ = now_ms;
   return true;
+}
+
+void MacLink::requestTeamsToggleMute() {
+  if (!commandChannelEnabled()) return;
+  pending_mute_ = true;
+}
+
+void MacLink::requestTeamsToggleCamera() {
+  if (!commandChannelEnabled()) return;
+  pending_cam_ = true;
 }
 
 void MacLink::requestOutputVolumeDelta(int detents) {
@@ -126,15 +144,20 @@ void MacLink::requestOutputVolumeDelta(int detents) {
 
 int MacLink::buildResponse(char *out, size_t cap) {
   if (out == nullptr || cap == 0) return 0;
-  int n = 0;
-  if (pending_delta_ != 0) {
-    n = std::snprintf(out, cap, "v=%d\ntok=%s\nadjust_output_volume=%d\n",
-                      PROTOCOL_V, token_, pending_delta_);
-  } else {
-    n = std::snprintf(out, cap, "v=%d\ntok=%s\n", PROTOCOL_V, token_);
-  }
+  int n = std::snprintf(out, cap, "v=%d\ntok=%s\n", PROTOCOL_V, token_);
   if (n < 0 || static_cast<size_t>(n) >= cap) return 0;
-  pending_delta_ = 0;  // delivered exactly once
+  auto append = [&](const char *fmt, int v) {
+    const int m = std::snprintf(out + n, cap - static_cast<size_t>(n), fmt, v);
+    if (m > 0 && static_cast<size_t>(n + m) < cap) n += m;
+  };
+  if (pending_delta_ != 0) append("adjust_output_volume=%d\n", pending_delta_);
+  if (pending_mute_) append("teams_toggle_mute=%d\n", 1);
+  if (pending_cam_) append("teams_toggle_camera=%d\n", 1);
+  // Delivered exactly once, all of them - a toggle repeated on the next beat
+  // would un-toggle it.
+  pending_delta_ = 0;
+  pending_mute_ = false;
+  pending_cam_ = false;
   return n;
 }
 

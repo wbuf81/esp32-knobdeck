@@ -2,6 +2,7 @@
 
 #include <cstdio>
 
+#include "gfx/Geometry.h"
 #include "shell/GestureFlash.h"
 
 namespace input {
@@ -113,6 +114,20 @@ Action routePlayer(Gesture g, const PlaybackState &pb) {
     default:
       return a;
   }
+}
+
+TeamsAction routeTeams(Gesture g, int tap_x) {
+  TeamsAction a;
+  if (g == Gesture::Tap) {
+    // The state may be UNKNOWN and the tap still routes: the user's intent is
+    // clear, and Teams is the authority on what the toggle does. Refusing to
+    // act on an unknown display would trap them exactly when the link is flaky.
+    if (tap_x < gfx::CX) a.toggle_mic = true;
+    else a.toggle_cam = true;
+  } else if (g == Gesture::SwipeDown) {
+    a.exit_screen = true;
+  }
+  return a;
 }
 
 }  // namespace input

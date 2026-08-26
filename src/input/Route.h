@@ -36,7 +36,7 @@ namespace input {
 
 // Order matches the enum this replaced in main_esp32.cpp, so the 39 existing
 // `Screen::X` sites there keep their meaning via a using-declaration.
-enum class Screen : uint8_t { Player, Playlists, Tracks, Confirm, Themes };
+enum class Screen : uint8_t { Player, Playlists, Tracks, Confirm, Themes, Teams };
 
 // Everything the caller has to do, as data. No side effects here: the whole
 // point is that the decision can be made in a test and applied on a device.
@@ -61,5 +61,19 @@ struct Action {
 
 // `pb` carries both has_track and has_device, and the transport rules read both.
 Action routePlayer(Gesture g, const PlaybackState &pb);
+
+// The Teams screen: two half-disc buttons, split at the centreline. What the
+// caller must do, as data - toggles go to MacLink, not the Spotify queue.
+struct TeamsAction {
+  bool toggle_mic = false;
+  bool toggle_cam = false;
+  bool exit_screen = false;  // the manual escape hatch back to the player
+};
+
+// tap_x is GestureRecognizer::tapX() - the touch DOWN position, because a
+// gesture that slides off a button still belongs to the button it began on.
+// Everything except tap-left, tap-right and swipe-down deliberately does
+// nothing: mid-meeting is the worst place for a surprise action.
+TeamsAction routeTeams(Gesture g, int tap_x);
 
 }  // namespace input

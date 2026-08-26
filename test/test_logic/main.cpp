@@ -52,6 +52,8 @@
 #include "views/CoverLight.h"
 #include "views/DaisyIdle.h"
 #include "views/SafeScreen.h"
+#include "views/TeamsScreen.h"
+#include "core/PendingToggle.h"
 #include "shell/ListView.h"
 #include "shell/NowPlaying.h"
 #include "shell/Toast.h"
@@ -3648,6 +3650,62 @@ void test_maclink_ignores_unknown_keys(void) {
 }
 
 
+
+void test_maclink_carries_teams_state(void) {
+  // Tri-state like out_muted, and for the same reason: a helper too old to
+  // send these must read as unknown, and a confident "not in a call" or "not
+  // muted" from silence would be a lie about a live microphone.
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  TEST_ASSERT_TRUE(ml.applyBeat(
+      "v=1\ntok=s3cret\nteams_in_call=1\nteams_muted=0\nteams_camera=1\n",
+      1000));
+  TEST_ASSERT_EQUAL_INT(1, ml.state().teams_in_call);
+  TEST_ASSERT_EQUAL_INT(0, ml.state().teams_muted);
+  TEST_ASSERT_EQUAL_INT(1, ml.state().teams_camera);
+  TEST_ASSERT_TRUE(ml.applyBeat("v=1\ntok=s3cret\nlocked=0\n", 2000));
+  TEST_ASSERT_EQUAL_INT(-1, ml.state().teams_in_call);
+  TEST_ASSERT_EQUAL_INT(-1, ml.state().teams_muted);
+  TEST_ASSERT_EQUAL_INT(-1, ml.state().teams_camera);
+}
+
+void test_maclink_queues_teams_toggles_delivered_once(void) {
+  // Toggles, not set-states: Teams is the authority, so the device only ever
+  // asks it to flip - a set-state raced against another device's toggle would
+  // fight over who is right, and a toggle cannot.
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  ml.requestTeamsToggleMute();
+  TEST_ASSERT_TRUE(ml.hasPending());
+  char buf[256];
+  TEST_ASSERT_TRUE(ml.buildResponse(buf, sizeof(buf)) > 0);
+  TEST_ASSERT_TRUE(std::strstr(buf, "teams_toggle_mute=1") != nullptr);
+  ml.buildResponse(buf, sizeof(buf));
+  TEST_ASSERT_TRUE(std::strstr(buf, "teams_toggle_mute") == nullptr);
+
+  ml.requestTeamsToggleCamera();
+  ml.buildResponse(buf, sizeof(buf));
+  TEST_ASSERT_TRUE(std::strstr(buf, "teams_toggle_camera=1") != nullptr);
+}
+
+void test_maclink_teams_toggles_ride_with_a_volume_delta(void) {
+  // A knob turn and a mute tap in the same beat window must both arrive.
+  net::MacLink ml;
+  ml.setToken("s3cret");
+  ml.requestOutputVolumeDelta(2);
+  ml.requestTeamsToggleMute();
+  char buf[256];
+  ml.buildResponse(buf, sizeof(buf));
+  TEST_ASSERT_TRUE(std::strstr(buf, "adjust_output_volume=2") != nullptr);
+  TEST_ASSERT_TRUE(std::strstr(buf, "teams_toggle_mute=1") != nullptr);
+}
+
+void test_maclink_toggles_need_the_token_like_everything_else(void) {
+  net::MacLink ml;  // no token: command channel disabled
+  ml.requestTeamsToggleMute();
+  TEST_ASSERT_FALSE(ml.hasPending());
+}
+
 void test_maclink_carries_the_mute_state(void) {
   // Carried for the same reason sp_track is: the knob is growing toward
   // showing mute/mic state, and the field costs a line now or a protocol
@@ -3828,6 +3886,178 @@ void test_maclink_truncates_a_long_name_without_overflowing(void) {
   body += "\n";
   TEST_ASSERT_TRUE(ml.applyBeat(body.c_str(), 1000));
   TEST_ASSERT_TRUE(std::strlen(ml.state().host) < 64);
+}
+
+
+// ---------------------------------------------------------------------------
+// Teams screen
+// ---------------------------------------------------------------------------
+
+void test_pending_toggle_arms_and_expires(void) {
+  // The pending state is what stops a tap from lying: the half dims until
+  // Teams echoes the new state back. But Teams may never answer - the API can
+  // drop mid-call - so pending expires rather than dimming forever.
+  core::PendingToggle p;
+  TEST_ASSERT_FALSE(p.pending(1000));
+  p.arm(1000);
+  TEST_ASSERT_TRUE(p.pending(1500));
+  TEST_ASSERT_FALSE(p.pending(1000 + core::PendingToggle::EXPIRE_MS));
+  p.arm(0xFFFFFF00u);  // wrap-safe like every deadline here
+  TEST_ASSERT_TRUE(p.pending(0xFFFFFF00u + 100));
+}
+
+void test_pending_toggle_clears_on_confirmation(void) {
+  core::PendingToggle p;
+  p.arm(1000);
+  p.clear();
+  TEST_ASSERT_FALSE(p.pending(1001));
+}
+
+void test_teams_screen_owns_every_pixel(void) {
+  gfx::Framebuffer fb;
+  fb.fill(0xF81F);
+  views::TeamsScreen t;
+  t.begin();
+  t.prepare(/*muted=*/0, /*camera=*/1, /*mic_pending=*/false,
+            /*cam_pending=*/false, /*call_s=*/754);
+  gfx::Surface s = fullSurface(fb);
+  t.renderBand(s);
+  int leftover = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (fb.at(x, y) == 0xF81F) ++leftover;
+  TEST_ASSERT_EQUAL_INT(0, leftover);
+}
+
+void test_teams_screen_drawn_in_bands_matches_full_frame(void) {
+  gfx::Framebuffer whole, banded;
+  whole.fill(0x0000);
+  banded.fill(0x0000);
+  views::TeamsScreen a, b;
+  a.begin();
+  b.begin();
+  a.prepare(1, 0, false, false, 62);
+  b.prepare(1, 0, false, false, 62);
+  gfx::Surface s = fullSurface(whole);
+  a.renderBand(s);
+  for (int y = 0; y < gfx::H; y += 20) {
+    gfx::Surface bs;
+    bs.px = banded.pixels() + static_cast<size_t>(y) * gfx::W;
+    bs.w = gfx::W;
+    bs.h = 20;
+    bs.y0 = y;
+    b.renderBand(bs);
+  }
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (whole.at(x, y) != banded.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+void test_teams_screen_live_mic_looks_different_from_muted(void) {
+  // The entire point of the screen is the across-the-room glance. If live and
+  // muted render similarly enough that pixels barely change, the glance lies.
+  gfx::Framebuffer live, muted;
+  live.fill(0x0000);
+  muted.fill(0x0000);
+  views::TeamsScreen a, b;
+  a.begin();
+  b.begin();
+  a.prepare(0, 1, false, false, 10);   // unmuted = LIVE mic
+  b.prepare(1, 1, false, false, 10);   // muted
+  gfx::Surface sa = fullSurface(live);
+  gfx::Surface sb = fullSurface(muted);
+  a.renderBand(sa);
+  b.renderBand(sb);
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W / 2; ++x)  // the mic half
+      if (live.at(x, y) != muted.at(x, y)) ++diffs;
+  TEST_ASSERT_TRUE(diffs > 5000);
+}
+
+void test_teams_screen_unknown_renders_differently_from_both(void) {
+  // Link dropped mid-call: the half must read as UNKNOWN, not as a confident
+  // stale state - a grey question over a live microphone beats a green lie.
+  gfx::Framebuffer unknown, muted;
+  unknown.fill(0x0000);
+  muted.fill(0x0000);
+  views::TeamsScreen a, b;
+  a.begin();
+  b.begin();
+  a.prepare(-1, -1, false, false, -1);
+  b.prepare(1, 1, false, false, 10);
+  gfx::Surface sa = fullSurface(unknown);
+  gfx::Surface sb = fullSurface(muted);
+  a.renderBand(sa);
+  b.renderBand(sb);
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (unknown.at(x, y) != muted.at(x, y)) ++diffs;
+  TEST_ASSERT_TRUE(diffs > 5000);
+}
+
+void test_teams_screen_pending_renders_differently_from_settled(void) {
+  gfx::Framebuffer settled, pending;
+  settled.fill(0x0000);
+  pending.fill(0x0000);
+  views::TeamsScreen a, b;
+  a.begin();
+  b.begin();
+  a.prepare(1, 1, false, false, 10);
+  b.prepare(1, 1, true, false, 10);
+  gfx::Surface sa = fullSurface(settled);
+  gfx::Surface sb = fullSurface(pending);
+  a.renderBand(sa);
+  b.renderBand(sb);
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W / 2; ++x)
+      if (settled.at(x, y) != pending.at(x, y)) ++diffs;
+  TEST_ASSERT_TRUE(diffs > 1000);
+}
+
+// ---------------------------------------------------------------------------
+// Teams routing
+// ---------------------------------------------------------------------------
+
+void test_teams_tap_left_toggles_the_mic(void) {
+  const input::TeamsAction a =
+      input::routeTeams(input::Gesture::Tap, /*tap_x=*/90);
+  TEST_ASSERT_TRUE(a.toggle_mic);
+  TEST_ASSERT_FALSE(a.toggle_cam);
+  TEST_ASSERT_FALSE(a.exit_screen);
+}
+
+void test_teams_tap_right_toggles_the_camera(void) {
+  const input::TeamsAction a = input::routeTeams(input::Gesture::Tap, 270);
+  TEST_ASSERT_FALSE(a.toggle_mic);
+  TEST_ASSERT_TRUE(a.toggle_cam);
+}
+
+void test_teams_swipe_down_exits(void) {
+  // The manual escape hatch: the screen normally leaves when the call does,
+  // but a user who wants the player back mid-call must not be trapped.
+  const input::TeamsAction a =
+      input::routeTeams(input::Gesture::SwipeDown, 180);
+  TEST_ASSERT_TRUE(a.exit_screen);
+  TEST_ASSERT_FALSE(a.toggle_mic);
+}
+
+void test_teams_other_gestures_do_nothing(void) {
+  // Mid-meeting is the worst place for a surprise action. Swipes L/R, long
+  // press, none of it means anything here - yet.
+  for (input::Gesture g :
+       {input::Gesture::None, input::Gesture::SwipeLeft,
+        input::Gesture::SwipeRight, input::Gesture::SwipeUp,
+        input::Gesture::LongPress}) {
+    const input::TeamsAction a = input::routeTeams(g, 90);
+    TEST_ASSERT_FALSE(a.toggle_mic);
+    TEST_ASSERT_FALSE(a.toggle_cam);
+    TEST_ASSERT_FALSE(a.exit_screen);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -4823,6 +5053,17 @@ int main(int, char **) {
   RUN_TEST(test_long_press_with_a_track_toggles_like);
   RUN_TEST(test_long_press_with_nothing_listening_gets_zoomies);
   RUN_TEST(test_long_press_with_a_device_but_no_track_still_refuses_visibly);
+  RUN_TEST(test_pending_toggle_arms_and_expires);
+  RUN_TEST(test_pending_toggle_clears_on_confirmation);
+  RUN_TEST(test_teams_screen_owns_every_pixel);
+  RUN_TEST(test_teams_screen_drawn_in_bands_matches_full_frame);
+  RUN_TEST(test_teams_screen_live_mic_looks_different_from_muted);
+  RUN_TEST(test_teams_screen_unknown_renders_differently_from_both);
+  RUN_TEST(test_teams_screen_pending_renders_differently_from_settled);
+  RUN_TEST(test_teams_tap_left_toggles_the_mic);
+  RUN_TEST(test_teams_tap_right_toggles_the_camera);
+  RUN_TEST(test_teams_swipe_down_exits);
+  RUN_TEST(test_teams_other_gestures_do_nothing);
   RUN_TEST(test_a_tap_reports_where_it_started);
   RUN_TEST(test_tap_position_survives_until_the_next_touch);
   RUN_TEST(test_a_swipe_still_reports_its_origin_not_its_end);
@@ -4857,6 +5098,10 @@ int main(int, char **) {
   RUN_TEST(test_maclink_rejects_a_token_of_the_right_length_but_wrong_bytes);
   RUN_TEST(test_maclink_rejects_a_bad_version);
   RUN_TEST(test_maclink_ignores_unknown_keys);
+  RUN_TEST(test_maclink_carries_teams_state);
+  RUN_TEST(test_maclink_queues_teams_toggles_delivered_once);
+  RUN_TEST(test_maclink_teams_toggles_ride_with_a_volume_delta);
+  RUN_TEST(test_maclink_toggles_need_the_token_like_everything_else);
   RUN_TEST(test_maclink_carries_the_mute_state);
   RUN_TEST(test_maclink_missing_volume_reads_as_unknown);
   RUN_TEST(test_maclink_empty_token_disables_the_command_channel);

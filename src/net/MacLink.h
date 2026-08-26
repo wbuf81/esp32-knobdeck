@@ -42,6 +42,14 @@ struct MacState {
   // would be a lie of exactly the kind unknown-renders-as-unknown forbids.
   int out_muted = -1;
 
+  // Teams, from its own local API via the helper. Tri-state for the same
+  // reason as out_muted: a helper too old (or a Teams with the API off) must
+  // read as unknown, and a confident "not muted" about a live microphone is
+  // the exact lie this project's invariant exists to forbid.
+  int teams_in_call = -1;
+  int teams_muted = -1;
+  int teams_camera = -1;
+
   // Playback, straight from the Mac's own Spotify via AppleScript. Verified
   // available on the real machine, and it costs no API quota - which is the
   // whole point: the GET /me/player poll that exhausted the quota is exactly
@@ -100,7 +108,17 @@ class MacLink {
   // reports a value one command stale, and the device resyncing to that made the
   // knob fight itself.
   void requestOutputVolumeDelta(int detents);
-  bool hasPending() const { return pending_delta_ != 0; }
+
+  // Toggles, not set-states, deliberately: Teams is the authority, so the
+  // device only ever asks it to FLIP. A set-state raced against another
+  // client's toggle fights over who is right; a toggle cannot. Latched until
+  // delivered, exactly once, like the volume delta.
+  void requestTeamsToggleMute();
+  void requestTeamsToggleCamera();
+
+  bool hasPending() const {
+    return pending_delta_ != 0 || pending_mute_ || pending_cam_;
+  }
 
   // Clamped so one stuck report cannot spin the volume end to end.
   static constexpr int MAX_DELTA = 16;
@@ -119,6 +137,8 @@ class MacLink {
   MacState state_;
   char token_[TOKEN_CAP] = {};
   int pending_delta_ = 0;
+  bool pending_mute_ = false;
+  bool pending_cam_ = false;
   uint32_t last_beat_ms_ = 0;
 };
 
