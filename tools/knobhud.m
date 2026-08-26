@@ -95,16 +95,28 @@
 }
 
 - (void)show {
+  fprintf(stderr, "[knobhud] show vol=%d muted=%d\n", self.view.volume,
+          self.view.muted);
+  fflush(stderr);
   [self.window orderFrontRegardless];
   [self.hide invalidate];
   self.hide = [NSTimer scheduledTimerWithTimeInterval:1.4
                                               repeats:NO
                                                 block:^(NSTimer *t) {
+                                                  fprintf(stderr,
+                                                          "[knobhud] hide\n");
+                                                  fflush(stderr);
                                                   [self.window orderOut:nil];
                                                 }];
 }
 
 - (void)handleLine:(NSString *)line {
+  // Every received line, to stderr - which the helper's launchd redirect sends
+  // to /tmp/knob-maclink.log. This is the receive-side half of a ledger whose
+  // send side the helper already writes, so the next real knob turn documents
+  // itself end to end with no timing choreography: wrote / received / painted.
+  fprintf(stderr, "[knobhud] recv %s\n", line.UTF8String);
+  fflush(stderr);
   NSArray<NSString *> *parts =
       [line componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
   if (parts.count < 2) return;

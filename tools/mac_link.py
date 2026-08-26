@@ -319,12 +319,18 @@ def _hud_send(line):
             _hud_proc.stdin.write((line + "\n").encode("utf-8"))
             _hud_proc.stdin.flush()
             return
-        except (OSError, ValueError):
+        except (OSError, ValueError) as e:
+            # Say WHICH attempt died. Both failing used to be silent, and a
+            # silent overlay failure looks exactly like a painted one from the
+            # sending side - the same invisible-failure trap as everything else
+            # today.
+            log(f"overlay write failed ({e}); respawning")
             try:
                 _hud_proc.kill()
             except Exception:
                 pass
             _hud_proc = None
+    log("overlay unreachable after respawn; volume still applied")
 
 
 def adjust_output_volume(delta):
