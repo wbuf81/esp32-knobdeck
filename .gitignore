@@ -7,3 +7,4 @@ src/config/secrets.h
 # Compiled locally with clang; see the matching .m files.
 tools/knobhud
 tools/avstate
+tools/axteams

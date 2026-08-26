@@ -449,7 +449,47 @@ def teams_running():
     return cached("teams_running", 5.0, read)
 
 
-def teams_fields(running, mic, cam):
+AXTEAMS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "axteams")
+_axteams_grant_said = False
+
+
+def ax_teams_state():
+    """(in_call, muted, camera) from Teams' own buttons via tools/axteams.
+
+    The ONLY source on this machine that knows Teams' soft-mute: the local
+    device API never binds (Jamf tenant) and the hardware cannot tell, but the
+    mute button's label flips between Mute and Unmute and the AX tree exposes
+    it once AXManualAccessibility is set. (-1s when unreadable.)
+
+    Exit 3 means the binary lacks its Accessibility grant under launchd - said
+    once, because a per-beat nag is churn.
+    """
+    global _axteams_grant_said
+    if not os.access(AXTEAMS, os.X_OK):
+        return 0, -1, -1
+    try:
+        out = subprocess.run([AXTEAMS], capture_output=True, text=True,
+                             timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        return 0, -1, -1
+    if out.returncode == 3:
+        if not _axteams_grant_said:
+            _axteams_grant_said = True
+            log("axteams lacks Accessibility; mute state will stay unknown "
+                "(System Settings -> Accessibility -> add tools/axteams)")
+        return 0, -1, -1
+    vals = {"in_call": 0, "muted": -1, "camera": -1}
+    for part in (out.stdout or "").split():
+        k, _, v = part.partition("=")
+        if k in vals:
+            try:
+                vals[k] = int(v)
+            except ValueError:
+                pass
+    return vals["in_call"], vals["muted"], vals["camera"]
+
+
+def teams_fields(running, mic, cam, ax_in_call=0, ax_muted=-1, ax_camera=-1):
     """The in-call inference, pure so it is testable.
 
     Teams' own local API would not bind on this machine (the 8124 server never
@@ -465,13 +505,24 @@ def teams_fields(running, mic, cam):
     Teams idles in the background reads as "in a Teams call". Disambiguating
     needs the socket or the accessibility tree - phase 2 either way.
     """
-    if mic < 0:
+    # AX truth outranks inference wherever it speaks. The tree KNOWS there is a
+    # call (a Leave button exists) and knows the mute label; the mic heuristic
+    # only knows something is capturing. Where the tree is silent - overrun,
+    # missing grant, non-English labels - the old inference still stands, and
+    # mute stays unknown rather than guessed.
+    in_call = ax_in_call == 1 or (running and mic == 1)
+    if mic < 0 and ax_in_call != 1:
         return {}
     if not running:
         return {"teams_in_call": "0"}
-    fields = {"teams_in_call": "1" if mic == 1 else "0"}
-    if mic == 1 and cam >= 0:
-        fields["teams_camera"] = str(cam)
+    fields = {"teams_in_call": "1" if in_call else "0"}
+    if in_call:
+        if ax_muted >= 0:
+            fields["teams_muted"] = str(ax_muted)
+        if ax_camera >= 0:
+            fields["teams_camera"] = str(ax_camera)
+        elif cam >= 0:
+            fields["teams_camera"] = str(cam)
     return fields
 
 
@@ -558,7 +609,10 @@ def build_body(token):
         if cam >= 0:
             fields.append(f"teams_camera={cam}")
     else:
-        for k, v in teams_fields(teams_running(), *av_state()).items():
+        running = teams_running()
+        mic, cam = av_state()
+        ax = ax_teams_state() if running else (0, -1, -1)
+        for k, v in teams_fields(running, mic, cam, *ax).items():
             fields.append(f"{k}={v}")
     for k, v in playback.items():
         fields.append(f"{k}={v}")

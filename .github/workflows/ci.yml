@@ -92,6 +92,9 @@ jobs:
           test -f tools/avstate.m
           grep -q "kCMIODevicePropertyDeviceIsRunningSomewhere" tools/avstate.m
           echo "avstate.m present and still reads the hardware flags"
+          test -f tools/axteams.m
+          grep -q "AXManualAccessibility" tools/axteams.m
+          echo "axteams.m present and still unlocks the tree"
 
       - name: Python syntax
         run: python3 -m compileall -q tools/*.py

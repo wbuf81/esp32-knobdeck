@@ -459,6 +459,70 @@ class TestTeamsInference(unittest.TestCase):
         self.assertNotIn("teams_camera", f)
 
 
+
+class TestAxTruthOutranksInference(unittest.TestCase):
+    """The AX tree KNOWS (a Leave button exists, the mute label flips); the mic
+    heuristic only knows something is capturing. Where the tree is silent, the
+    inference stands and mute stays unknown rather than guessed."""
+
+    def test_ax_supplies_the_mute_state(self):
+        f = m.teams_fields(True, 1, 1, ax_in_call=1, ax_muted=1, ax_camera=0)
+        self.assertEqual(f["teams_muted"], "1")
+        self.assertEqual(f["teams_camera"], "0")
+
+    def test_ax_in_call_wins_even_when_the_mic_heuristic_misses(self):
+        # A muted-at-join call where nothing captures yet... the Leave button
+        # is still there. The tree is the authority.
+        f = m.teams_fields(True, 0, -1, ax_in_call=1, ax_muted=1)
+        self.assertEqual(f["teams_in_call"], "1")
+        self.assertEqual(f["teams_muted"], "1")
+
+    def test_silent_tree_leaves_mute_unknown(self):
+        f = m.teams_fields(True, 1, 1)
+        self.assertNotIn("teams_muted", f)
+        self.assertEqual(f["teams_in_call"], "1")
+
+    def test_ax_camera_outranks_the_hardware_flag(self):
+        # Another app's camera must not read as Teams video.
+        f = m.teams_fields(True, 1, 1, ax_in_call=1, ax_muted=0, ax_camera=0)
+        self.assertEqual(f["teams_camera"], "0")
+
+    def test_hardware_camera_still_fills_in_when_ax_is_silent(self):
+        f = m.teams_fields(True, 1, 1, ax_in_call=1)
+        self.assertEqual(f["teams_camera"], "1")
+
+    def test_teams_not_running_still_wins_over_everything(self):
+        f = m.teams_fields(False, 1, 1, ax_in_call=1, ax_muted=1)
+        self.assertEqual(f["teams_in_call"], "0")
+
+
+class TestAxTeamsParse(unittest.TestCase):
+    def _proc(self, rc, out=""):
+        p = mock.MagicMock(); p.returncode = rc; p.stdout = out
+        return p
+
+    def test_parses_the_tool_output(self):
+        with mock.patch("os.access", return_value=True), \
+             mock.patch.object(m.subprocess, "run",
+                               return_value=self._proc(0, "in_call=1 muted=0 camera=1\n")):
+            self.assertEqual(m.ax_teams_state(), (1, 0, 1))
+
+    def test_missing_grant_reads_unknown_and_nags_once(self):
+        m._axteams_grant_said = False
+        self.addCleanup(lambda: setattr(m, "_axteams_grant_said", False))
+        logs = []
+        with mock.patch("os.access", return_value=True), \
+             mock.patch.object(m.subprocess, "run", return_value=self._proc(3)), \
+             mock.patch.object(m, "log", side_effect=logs.append):
+            self.assertEqual(m.ax_teams_state(), (0, -1, -1))
+            m.ax_teams_state()
+        self.assertEqual(len(logs), 1)
+
+    def test_missing_binary_reads_unknown(self):
+        with mock.patch("os.access", return_value=False):
+            self.assertEqual(m.ax_teams_state(), (0, -1, -1))
+
+
 class TestAvStateParse(unittest.TestCase):
     def test_parses_the_probe_output(self):
         with mock.patch.object(m, "run", return_value="mic=1 cam=0\n"), \

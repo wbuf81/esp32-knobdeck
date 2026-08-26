@@ -433,7 +433,13 @@ void loop() {
     const bool mac_volume = g_hostlink.mac().commandChannelEnabled() &&
                             g_hostlink.mac().state().valid &&
                             !g_hostlink.macStale(now);
-    if (mac_volume && g_screen == Screen::Player) {
+    // Player OR Teams: mid-call is precisely when reaching for the volume knob
+    // is most natural, and the design always promised it there - the gate just
+    // never got widened when the Teams screen landed. The knob's own ring is
+    // suppressed on that screen, but the Mac-side overlay shows the level,
+    // which mid-call is the better place for it anyway.
+    if (mac_volume &&
+        (g_screen == Screen::Player || g_screen == Screen::Teams)) {
       if (g_volume < 0) {
         // Start from the Mac's real level rather than a guess, so the ring shows
         // something true before the first beat comes back.
