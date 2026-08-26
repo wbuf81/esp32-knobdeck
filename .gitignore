@@ -4,5 +4,6 @@
 src/config/secrets.h
 .claude.local.md
 
-# Compiled locally with clang; see tools/knobhud.m.
+# Compiled locally with clang; see the matching .m files.
 tools/knobhud
+tools/avstate

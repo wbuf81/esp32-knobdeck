@@ -89,6 +89,9 @@ jobs:
           grep -q "NSScreenSaverWindowLevel" tools/knobhud.m
           grep -q "orderFrontRegardless" tools/knobhud.m
           echo "knobhud.m present and still draws an overlay"
+          test -f tools/avstate.m
+          grep -q "kCMIODevicePropertyDeviceIsRunningSomewhere" tools/avstate.m
+          echo "avstate.m present and still reads the hardware flags"
 
       - name: Python syntax
         run: python3 -m compileall -q tools/*.py
