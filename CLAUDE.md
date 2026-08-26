@@ -53,6 +53,9 @@ optimising or touching the panel, encoder, or memory layout.
 - Lock state: `IOConsoleLocked` and `CGSSessionScreenIsLocked` both flip, and the latter is *absent* while unlocked. No Quartz in system python 3.9; `pmset -g powerstate` fails on Apple Silicon.
 - **Never print a `/beat` response** — it echoes the shared token by design, for mutual verification.
 - Any device→Mac command must stay a fixed allowlist with typed, range-checked arguments. Never a string the Mac evaluates.
+- **The device's mDNS answers in ~5.4s and SUCCEEDS**, so a `.local`-first host list silently taxes every beat with no error and no log. IP first, name as fallback. A timeout generous enough to absorb the resolve is what hid it.
+- **TCC grants bind to the binary's ad-hoc signature** — every clang rebuild voids them silently while `AXIsProcessTrusted` still says true. Never build on event posting; draw windows instead (permissionless).
+- Latency triage is one knob gesture: merge `/tmp/knob-maclink.log` (timestamped, includes the `[knobhud]` ledger) with serial `knob->mac` stamps and read the hop deltas. The instrumentation is permanent.
 
 ## Secrets
 
