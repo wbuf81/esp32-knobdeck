@@ -388,6 +388,81 @@ HANDLERS = {
 }
 
 
+AVSTATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "avstate")
+
+
+def av_state():
+    """(mic_running, cam_running) from the hardware, via tools/avstate.
+
+    Permissionless CoreMediaIO/CoreAudio flags - the same truth the menu-bar
+    orange and green dots draw from. (-1, -1) when unreadable.
+    """
+    out = run([AVSTATE]) if os.access(AVSTATE, os.X_OK) else None
+    if not out:
+        return -1, -1
+    mic = cam = -1
+    for part in out.split():
+        if part.startswith("mic="):
+            mic = int(part[4:])
+        elif part.startswith("cam="):
+            cam = int(part[4:])
+    return mic, cam
+
+
+def teams_running():
+    def read():
+        out = run(["pgrep", "-x", "MSTeams"])
+        return bool(out and out.strip())
+    return cached("teams_running", 5.0, read)
+
+
+def teams_fields(running, mic, cam):
+    """The in-call inference, pure so it is testable.
+
+    Teams' own local API would not bind on this machine (the 8124 server never
+    started, tenant policy suspected), so in-call is INFERRED: Teams running
+    AND something capturing the mic. Camera state is the hardware's own flag.
+
+    What is deliberately NOT here: teams_muted. Teams keeps capturing while
+    soft-muted, so the hardware cannot know - and a guessed mute over a hot
+    microphone is the lie this project's oldest invariant forbids. The device
+    renders the mic half as unknown until a source that actually knows exists.
+
+    Known limitation, accepted for v1: any OTHER app capturing the mic while
+    Teams idles in the background reads as "in a Teams call". Disambiguating
+    needs the socket or the accessibility tree - phase 2 either way.
+    """
+    if mic < 0:
+        return {}
+    if not running:
+        return {"teams_in_call": "0"}
+    fields = {"teams_in_call": "1" if mic == 1 else "0"}
+    if mic == 1 and cam >= 0:
+        fields["teams_camera"] = str(cam)
+    return fields
+
+
+_socket_seen = False
+
+
+def watch_for_teams_api():
+    """One cheap connect per beat: if Teams' device API EVER binds 8124 - it
+    may be call-scoped, and every manual test window missed the calls - the
+    ledger says so and phase 2 gets its answer without choreography."""
+    global _socket_seen
+    if _socket_seen:
+        return
+    import socket
+    try:
+        s = socket.create_connection(("localhost", 8124), timeout=0.05)
+        s.close()
+        _socket_seen = True
+        log("TEAMS LOCAL API IS LISTENING on 8124 - the socket exists after "
+            "all; tell the developer")
+    except OSError:
+        pass
+
+
 def build_body(token):
     name = computer_name()
 
@@ -438,6 +513,9 @@ def build_body(token):
     ]
     if out_muted is not None:
         fields.append(f"out_muted={1 if out_muted else 0}")
+    watch_for_teams_api()
+    for k, v in teams_fields(teams_running(), *av_state()).items():
+        fields.append(f"{k}={v}")
     for k, v in playback.items():
         fields.append(f"{k}={v}")
     return ("\n".join(fields) + "\n").encode("utf-8")

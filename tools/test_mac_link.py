@@ -418,6 +418,63 @@ class TestOverlayBeforeSet(unittest.TestCase):
         self.assertEqual(order[2], "osa")
 
 
+
+class TestTeamsInference(unittest.TestCase):
+    """In-call is inferred (Teams running + mic capturing) because Teams' own
+    local API never binds on this machine. The inference is pure and these pin
+    its honesty rules."""
+
+    def test_in_a_call(self):
+        f = m.teams_fields(True, 1, 1)
+        self.assertEqual(f["teams_in_call"], "1")
+        self.assertEqual(f["teams_camera"], "1")
+
+    def test_in_a_call_camera_off(self):
+        f = m.teams_fields(True, 1, 0)
+        self.assertEqual(f["teams_camera"], "0")
+
+    def test_teams_open_but_idle(self):
+        f = m.teams_fields(True, 0, 0)
+        self.assertEqual(f["teams_in_call"], "0")
+        self.assertNotIn("teams_camera", f)
+
+    def test_teams_not_running_is_not_a_call(self):
+        f = m.teams_fields(False, 1, 1)
+        self.assertEqual(f["teams_in_call"], "0")
+
+    def test_unreadable_hardware_says_nothing(self):
+        # {} means the beat omits the fields and the device reads unknown -
+        # never a confident "not in a call" from a probe that failed.
+        self.assertEqual(m.teams_fields(True, -1, -1), {})
+
+    def test_mute_is_never_claimed(self):
+        # Teams keeps capturing while soft-muted, so hardware CANNOT know.
+        # A guessed mute over a hot microphone is the forbidden lie.
+        for args in ((True, 1, 1), (True, 0, 0), (False, 1, 0)):
+            self.assertNotIn("teams_muted", m.teams_fields(*args))
+
+    def test_camera_unreadable_in_call_is_omitted(self):
+        f = m.teams_fields(True, 1, -1)
+        self.assertEqual(f["teams_in_call"], "1")
+        self.assertNotIn("teams_camera", f)
+
+
+class TestAvStateParse(unittest.TestCase):
+    def test_parses_the_probe_output(self):
+        with mock.patch.object(m, "run", return_value="mic=1 cam=0\n"), \
+             mock.patch("os.access", return_value=True):
+            self.assertEqual(m.av_state(), (1, 0))
+
+    def test_missing_probe_reads_unknown(self):
+        with mock.patch("os.access", return_value=False):
+            self.assertEqual(m.av_state(), (-1, -1))
+
+    def test_garbage_reads_unknown(self):
+        with mock.patch.object(m, "run", return_value="what\n"), \
+             mock.patch("os.access", return_value=True):
+            self.assertEqual(m.av_state(), (-1, -1))
+
+
 class TestWholeBodySmoke(unittest.TestCase):
     """build_body with only the SUBPROCESS boundary mocked.
 
@@ -429,6 +486,8 @@ class TestWholeBodySmoke(unittest.TestCase):
     """
 
     def test_a_full_body_builds_with_real_readers(self):
+        m._cache.clear()
+        self.addCleanup(m._cache.clear)
         with mock.patch.object(m, "run", return_value="ok\n"), \
              mock.patch.object(m, "osa", return_value="50\nfalse\nNORUN"):
             body = m.build_body("tok").decode()
