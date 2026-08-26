@@ -552,7 +552,11 @@ def build_body(token):
         # switch, tap, toggle delivery, keystroke - can be exercised without
         # scheduling a meeting. Never set in the LaunchAgent plist.
         fields.append("teams_in_call=1")
-        fields.append("teams_camera=1")
+        # Camera stays REAL even in force mode: the hardware flag is the
+        # feedback loop, and a forced constant here made camera taps look dead.
+        _, cam = av_state()
+        if cam >= 0:
+            fields.append(f"teams_camera={cam}")
     else:
         for k, v in teams_fields(teams_running(), *av_state()).items():
             fields.append(f"{k}={v}")
