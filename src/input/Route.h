@@ -60,7 +60,10 @@ struct Action {
 };
 
 // `pb` carries both has_track and has_device, and the transport rules read both.
-Action routePlayer(Gesture g, const PlaybackState &pb);
+// `in_call` reroutes swipe-down to the Teams screen: during a call the meeting
+// is home, and the queue shortcut yields for the call's duration. The rest of
+// the rules are untouched by it.
+Action routePlayer(Gesture g, const PlaybackState &pb, bool in_call = false);
 
 // The Teams screen: two half-disc buttons, split at the centreline. What the
 // caller must do, as data - toggles go to MacLink, not the Spotify queue.
@@ -72,8 +75,10 @@ struct TeamsAction {
 
 // tap_x is GestureRecognizer::tapX() - the touch DOWN position, because a
 // gesture that slides off a button still belongs to the button it began on.
-// Everything except tap-left, tap-right and swipe-down deliberately does
-// nothing: mid-meeting is the worst place for a surprise action.
+// Swipe UP leaves toward the music - up is "out toward the library" everywhere
+// on this device, and during a call home is the meeting, so down from the
+// player comes back here. Everything else deliberately does nothing:
+// mid-meeting is the worst place for a surprise action.
 TeamsAction routeTeams(Gesture g, int tap_x);
 
 }  // namespace input

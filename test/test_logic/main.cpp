@@ -4023,6 +4023,47 @@ void test_teams_screen_pending_renders_differently_from_settled(void) {
 // Teams routing
 // ---------------------------------------------------------------------------
 
+
+void test_swipe_down_during_a_call_returns_to_the_meeting(void) {
+  // During a call the MEETING is home. The queue shortcut yields for the
+  // call's duration - mid-meeting you need the mute button back, not UP NEXT.
+  const input::Action a = input::routePlayer(input::Gesture::SwipeDown,
+                                             playingTrack(), /*in_call=*/true);
+  TEST_ASSERT_EQUAL(input::Screen::Teams, a.screen);
+  TEST_ASSERT_EQUAL(CommandType::None, a.command);
+}
+
+void test_swipe_down_without_a_call_still_opens_the_queue(void) {
+  const input::Action a = input::routePlayer(input::Gesture::SwipeDown,
+                                             playingTrack(), /*in_call=*/false);
+  TEST_ASSERT_EQUAL(input::Screen::Tracks, a.screen);
+  TEST_ASSERT_EQUAL(CommandType::FetchQueue, a.command);
+}
+
+void test_swipe_down_on_the_dog_during_a_call_goes_to_the_meeting(void) {
+  // In-call outranks the dog-screen swallow: the wag is charming, the mute
+  // button is necessary.
+  const input::Action a = input::routePlayer(input::Gesture::SwipeDown,
+                                             nothingListening(), true);
+  TEST_ASSERT_EQUAL(input::Screen::Teams, a.screen);
+}
+
+void test_teams_swipe_up_leaves_toward_the_music(void) {
+  // Up = out toward the library, down = home, and during a call home is the
+  // meeting. So UP leaves Teams; down (from anywhere closer to the library)
+  // comes back.
+  const input::TeamsAction a = input::routeTeams(input::Gesture::SwipeUp, 180);
+  TEST_ASSERT_TRUE(a.exit_screen);
+}
+
+void test_teams_swipe_down_is_now_a_no_op(void) {
+  // Already home. Down must not exit any more - that was the old escape hatch,
+  // replaced by the symmetric rule.
+  const input::TeamsAction a =
+      input::routeTeams(input::Gesture::SwipeDown, 180);
+  TEST_ASSERT_FALSE(a.exit_screen);
+}
+
 void test_teams_tap_left_toggles_the_mic(void) {
   const input::TeamsAction a =
       input::routeTeams(input::Gesture::Tap, /*tap_x=*/90);
@@ -4037,21 +4078,15 @@ void test_teams_tap_right_toggles_the_camera(void) {
   TEST_ASSERT_TRUE(a.toggle_cam);
 }
 
-void test_teams_swipe_down_exits(void) {
-  // The manual escape hatch: the screen normally leaves when the call does,
-  // but a user who wants the player back mid-call must not be trapped.
-  const input::TeamsAction a =
-      input::routeTeams(input::Gesture::SwipeDown, 180);
-  TEST_ASSERT_TRUE(a.exit_screen);
-  TEST_ASSERT_FALSE(a.toggle_mic);
-}
 
 void test_teams_other_gestures_do_nothing(void) {
   // Mid-meeting is the worst place for a surprise action. Swipes L/R, long
   // press, none of it means anything here - yet.
+  // SwipeUp exits (toward the music) and is tested separately; SwipeDown is
+  // home already, so it belongs in the nothing-list now.
   for (input::Gesture g :
        {input::Gesture::None, input::Gesture::SwipeLeft,
-        input::Gesture::SwipeRight, input::Gesture::SwipeUp,
+        input::Gesture::SwipeRight, input::Gesture::SwipeDown,
         input::Gesture::LongPress}) {
     const input::TeamsAction a = input::routeTeams(g, 90);
     TEST_ASSERT_FALSE(a.toggle_mic);
@@ -5060,9 +5095,13 @@ int main(int, char **) {
   RUN_TEST(test_teams_screen_live_mic_looks_different_from_muted);
   RUN_TEST(test_teams_screen_unknown_renders_differently_from_both);
   RUN_TEST(test_teams_screen_pending_renders_differently_from_settled);
+  RUN_TEST(test_swipe_down_during_a_call_returns_to_the_meeting);
+  RUN_TEST(test_swipe_down_without_a_call_still_opens_the_queue);
+  RUN_TEST(test_swipe_down_on_the_dog_during_a_call_goes_to_the_meeting);
+  RUN_TEST(test_teams_swipe_up_leaves_toward_the_music);
+  RUN_TEST(test_teams_swipe_down_is_now_a_no_op);
   RUN_TEST(test_teams_tap_left_toggles_the_mic);
   RUN_TEST(test_teams_tap_right_toggles_the_camera);
-  RUN_TEST(test_teams_swipe_down_exits);
   RUN_TEST(test_teams_other_gestures_do_nothing);
   RUN_TEST(test_a_tap_reports_where_it_started);
   RUN_TEST(test_tap_position_survives_until_the_next_touch);

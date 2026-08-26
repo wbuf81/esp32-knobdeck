@@ -619,7 +619,8 @@ void loop() {
         // reach. They are input::routePlayer now, which is why the tricky ones
         // - transport suppression, and swipe-down swallowed while swipe-up is
         // NOT - are assertions instead of comments.
-        const input::Action act = input::routePlayer(g, st.pb);
+        const input::Action act =
+            input::routePlayer(g, st.pb, g_teams_in_call_prev);
 
         if (act.poke_dog) g_dog.react(act.dog);
         if (act.show_glyph) g_flash.show(act.glyph, now);

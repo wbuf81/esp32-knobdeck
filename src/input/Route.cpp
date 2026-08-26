@@ -7,7 +7,7 @@
 
 namespace input {
 
-Action routePlayer(Gesture g, const PlaybackState &pb) {
+Action routePlayer(Gesture g, const PlaybackState &pb, bool in_call) {
   Action a;
   const bool transport =
       shell::transportFeedbackVisible(pb.has_track, pb.has_device);
@@ -86,6 +86,15 @@ Action routePlayer(Gesture g, const PlaybackState &pb) {
 
     case Gesture::SwipeDown:
       a.haptic_bump = true;
+      // During a call, down means the meeting - the mute button outranks both
+      // the queue and the dog. The shortcut and the wag return with the call's
+      // end.
+      if (in_call) {
+        a.screen = Screen::Teams;
+        a.glyph = shell::Glyph::ChevronDown;
+        a.show_glyph = true;
+        return a;
+      }
       if (!pb.has_track) {
         // The queue is what comes up AFTER something. With no current track
         // there is nothing for it to come after, so this used to jump to a list
@@ -124,7 +133,7 @@ TeamsAction routeTeams(Gesture g, int tap_x) {
     // act on an unknown display would trap them exactly when the link is flaky.
     if (tap_x < gfx::CX) a.toggle_mic = true;
     else a.toggle_cam = true;
-  } else if (g == Gesture::SwipeDown) {
+  } else if (g == Gesture::SwipeUp) {
     a.exit_screen = true;
   }
   return a;
