@@ -91,9 +91,71 @@ class TestVolumeAdjust(unittest.TestCase):
         m.adjust_output_volume("9999")
         self.assertEqual(len(self.runs), 16)
 
-    def test_the_hud_binary_is_preferred_over_applescript(self):
+    def test_the_hud_path_does_not_also_set_the_volume(self):
+        # It reads the volume to VERIFY the effect, but must never fall through
+        # to setting it as well - that would move the volume twice per click.
         m.adjust_output_volume("1")
-        self.assertEqual(self.osa, [], "must not fall back while volhud exists")
+        self.assertEqual(
+            [s for s in self.osa if s.startswith("set volume")], [],
+            "must not fall back while volhud is actually working")
+
+
+class TestHudVerification(unittest.TestCase):
+    """volhud exits 0 even when macOS accepts the event and ignores it.
+
+    AXIsProcessTrusted says yes, the CGEvent converts, the post returns, and the
+    volume does not move. Trusting the mechanism logged "(HUD)" for an event that
+    went nowhere and left the volume uncontrollable while the log claimed
+    success. So the effect is verified instead.
+    """
+
+    def setUp(self):
+        m._hud_works = None
+        self.addCleanup(lambda: setattr(m, "_hud_works", None))
+        self.vol = 50
+        self.sets = []
+        self.presses = []
+
+        def fake_osa(script):
+            if "get volume settings" in script:
+                return str(self.vol)
+            if script.startswith("set volume"):
+                self.sets.append(script)
+            return ""
+
+        p1 = mock.patch.object(m, "osa", side_effect=fake_osa)
+        p2 = mock.patch.object(m, "run", side_effect=lambda a, **k: self.presses.append(a))
+        p3 = mock.patch("os.access", return_value=True)
+        for p in (p1, p2, p3):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_an_inert_volhud_falls_back_to_setting_the_volume(self):
+        # volhud runs, volume does not move -> the fallback must still happen,
+        # or the knob does nothing at all.
+        m.adjust_output_volume("2")
+        self.assertEqual(len(self.presses), 2, "it should have tried")
+        self.assertEqual(len(self.sets), 1, "and then actually changed it")
+
+    def test_an_inert_volhud_is_not_retried_forever(self):
+        m.adjust_output_volume("1")
+        first = len(self.presses)
+        m.adjust_output_volume("1")
+        self.assertEqual(len(self.presses), first,
+                         "should stop trying once proven inert")
+        self.assertEqual(len(self.sets), 2, "but must keep working")
+
+    def test_a_working_volhud_is_trusted_thereafter(self):
+        # Make the volume move when volhud is pressed.
+        def moving(args, **k):
+            self.presses.append(args)
+            self.vol += 6 if args[1] == "up" else -6
+
+        with mock.patch.object(m, "run", side_effect=moving):
+            m.adjust_output_volume("1")
+            m.adjust_output_volume("1")
+        self.assertEqual(self.sets, [], "a working HUD must never fall back")
+        self.assertIs(m._hud_works, True)
 
 
 class TestVolumeAdjustFallback(unittest.TestCase):

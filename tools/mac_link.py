@@ -252,6 +252,20 @@ VOLHUD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "volhud")
 _STEP = 100.0 / 16.0
 
 
+def _read_volume():
+    v = osa("output volume of (get volume settings)")
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
+
+
+# None = untried, True = confirmed moving the volume, False = proven inert.
+_hud_works = None
+# Consecutive misses. A list so the closure can mutate it without a global.
+_hud_misses = [0]
+
+
 def adjust_output_volume(delta):
     """Move the output volume by `delta` clicks.
 
@@ -272,21 +286,52 @@ def adjust_output_volume(delta):
         return
     delta = max(-16, min(16, delta))
 
-    if os.access(VOLHUD, os.X_OK):
+    global _hud_works
+    if _hud_works is not False and os.access(VOLHUD, os.X_OK):
         arg = "up" if delta > 0 else "down"
+        # VERIFY THE EFFECT, do not trust the mechanism. volhud exits 0 even
+        # when macOS accepts the event and ignores it - AXIsProcessTrusted says
+        # yes, the CGEvent converts, the post returns, and the volume does not
+        # move. Logging "(HUD)" off the binary merely existing was a lie that
+        # looked exactly like success, and it left the volume uncontrollable
+        # while the log said otherwise.
+        before = _read_volume()
+        rc = 0
         for _ in range(abs(delta)):
-            run([VOLHUD, arg])
-        log(f"volume {arg} x{abs(delta)} (HUD)")
-        return
+            if run([VOLHUD, arg]) is None:
+                rc = 1  # non-zero exit; volhud says it is not permitted
+        # SETTLE before reading. The volume change is asynchronous, and reading
+        # straight after the presses catches the old value - which made a
+        # working HUD look inert after two clicks while three happened to take
+        # long enough. The verification's own race, not macOS's fault.
+        time.sleep(0.20)
+        after = _read_volume()
 
-    # No binary: change it silently rather than not at all. Absolute, because
-    # AppleScript has no relative form - which is exactly the round trip the
-    # delta protocol exists to avoid, so this really is the worse path.
-    cur = osa("output volume of (get volume settings)")
-    try:
-        cur = int(float(cur))
-    except (TypeError, ValueError):
-        log("volhud missing and volume unreadable; nothing done")
+        if rc == 0 and (before is None or after is None or before != after):
+            _hud_works = True
+            _hud_misses[0] = 0
+            log(f"volume {arg} x{abs(delta)} (HUD)")
+            return
+
+        # Nothing observable happened. Do NOT latch off a single miss: a slow
+        # read or a coalesced step would disable the good path permanently.
+        _hud_misses[0] += 1
+        if _hud_misses[0] < 3:
+            log(f"volhud no effect ({_hud_misses[0]}/3), using silent volume "
+                f"this time")
+        else:
+            if _hud_works is not False:
+                log("volhud posts but nothing moves; silent volume from now on "
+                    "(check Accessibility for tools/volhud)")
+            _hud_works = False
+
+    # No binary, or one that posts events macOS ignores. Change it silently
+    # rather than not at all. Absolute, because AppleScript has no relative
+    # form - which is exactly the round trip the delta protocol exists to
+    # avoid, so this really is the worse path, just not the useless one.
+    cur = _read_volume()
+    if cur is None:
+        log("volume unreadable; nothing done")
         return
     target = max(0, min(100, int(round(cur + delta * _STEP))))
     osa(f"set volume output volume {target}")

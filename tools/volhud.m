@@ -41,6 +41,18 @@ static void tap(int key, BOOL down) {
 }
 
 int main(int argc, char **argv) {
+  // Report whether we are actually TRUSTED, because CGEventPost gives no error
+  // when it is dropped - it returns void, the process exits 0, and the volume
+  // simply does not move. Exiting 0 in that state made the helper log "(HUD)"
+  // for an event that went nowhere, which is a lie that looks like success.
+  //
+  // Exit 3 means "built fine, not permitted": the caller can then fall back to
+  // a silent change rather than pretending.
+  if (!AXIsProcessTrusted()) {
+    fprintf(stderr, "volhud: not trusted for Accessibility; event would be "
+                    "dropped\n");
+    return 3;
+  }
   if (argc < 2) {
     fprintf(stderr, "usage: volhud up|down|mute\n");
     return 2;
