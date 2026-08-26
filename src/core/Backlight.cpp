@@ -18,15 +18,26 @@ void Backlight::update(uint32_t now_ms, bool playing, uint32_t last_input_ms,
   // a device left plugged in reaches that on a timer, not by chance.
   const uint32_t idle = now_ms - last_input_ms;
 
-  if (host_asleep && idle >= INPUT_OVERRIDE_MS) {
-    // No idle timer involved: the machine next to it is asleep, so waiting
-    // another four minutes to agree would be silly.
-    //
-    // But a recent touch overrides it. A wrong or stale host signal must never
-    // be able to hold the screen dark against the person in front of it.
-    state_ = ScreenState::Off;
-    just_woke_ = false;
-    return;
+  // Track when the host's sleep signal ARRIVED, because the override below is
+  // only owed to input that came after it.
+  if (host_asleep && !was_host_asleep_) asleep_since_ = now_ms;
+  was_host_asleep_ = host_asleep;
+
+  if (host_asleep) {
+    // Input at-or-after the transition, wrap-safe (same convention as the rest
+    // of this file: unsigned subtraction, top half of the range means "before").
+    const bool input_after =
+        (last_input_ms - asleep_since_) < (UINT32_MAX / 2);
+    // Off immediately unless a person has touched the device SINCE the lock -
+    // that person is the safety valve against a wrong or stale signal, which
+    // twice during development was the only way to get the screen back. Input
+    // from before the lock earns nothing; and even the valve lapses, so a real
+    // lock always wins in the end.
+    if (!input_after || idle >= INPUT_OVERRIDE_MS) {
+      state_ = ScreenState::Off;
+      just_woke_ = false;
+      return;
+    }
   }
 
   if (playing || idle < DIM_AFTER_MS) {

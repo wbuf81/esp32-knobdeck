@@ -4432,6 +4432,63 @@ void test_backlight_recent_input_beats_a_host_that_says_asleep(void) {
   TEST_ASSERT_EQUAL(core::ScreenState::Off, bl.state());
 }
 
+
+void test_backlight_locking_right_after_a_knob_turn_still_sleeps(void) {
+  // The bug as lived: turn the knob (it is a volume knob - touching it is the
+  // normal state), lock the Mac seconds later, and the screen stayed on for up
+  // to 90 seconds because "recent input beats host-asleep" never asked WHICH
+  // CAME FIRST. Input from before the lock is not a person vetoing the lock;
+  // it is just the last thing that happened before they walked away.
+  core::Backlight bl;
+  const uint32_t touched = 10000;
+  bl.update(touched, false, touched, /*host_asleep=*/false);
+  TEST_ASSERT_EQUAL(core::ScreenState::Bright, bl.state());
+  // Two seconds later the Mac locks. The knob turn predates it: OFF, now.
+  bl.update(touched + 2000, false, touched, /*host_asleep=*/true);
+  TEST_ASSERT_EQUAL(core::ScreenState::Off, bl.state());
+}
+
+void test_backlight_touch_after_the_lock_still_wins(void) {
+  // The safety valve the override exists for, restated with ordering: a WRONG
+  // or stale lock signal must never hold the screen dark against a person
+  // touching the device, because the thing that would clear it is the thing
+  // that is broken. Input AFTER the transition is that person.
+  core::Backlight bl;
+  bl.update(1000, false, 0, false);
+  bl.update(5000, false, 0, true);  // locks; old input, so off
+  TEST_ASSERT_EQUAL(core::ScreenState::Off, bl.state());
+  // A touch while dark: wake, and hold against the (possibly wrong) signal.
+  bl.update(9000, false, 9000, true);
+  TEST_ASSERT_EQUAL(core::ScreenState::Bright, bl.state());
+  // The override still lapses, so a real lock eventually wins.
+  bl.update(9000 + core::Backlight::INPUT_OVERRIDE_MS, false, 9000, true);
+  TEST_ASSERT_EQUAL(core::ScreenState::Off, bl.state());
+}
+
+void test_backlight_relocking_needs_input_after_the_NEW_transition(void) {
+  // Unlock and relock: the transition moves, and input that beat the FIRST
+  // lock must not also beat the second.
+  core::Backlight bl;
+  bl.update(1000, false, 0, true);   // locked, old input -> off
+  bl.update(2000, false, 2000, true);  // touch -> bright (after transition)
+  TEST_ASSERT_EQUAL(core::ScreenState::Bright, bl.state());
+  bl.update(3000, false, 2000, false);  // unlocked
+  bl.update(4000, false, 2000, true);   // RE-locked; touch was before this one
+  TEST_ASSERT_EQUAL(core::ScreenState::Off, bl.state());
+}
+
+void test_backlight_lock_ordering_survives_the_millis_wrap(void) {
+  core::Backlight bl;
+  const uint32_t near_wrap = 0xFFFFFF00u;
+  bl.update(near_wrap, false, near_wrap, false);
+  // Locks after the wrap; the touch is from before it, across the boundary.
+  bl.update(near_wrap + 0x300, false, near_wrap, true);
+  TEST_ASSERT_EQUAL(core::ScreenState::Off, bl.state());
+  // And a touch after the wrapped transition still wins.
+  bl.update(near_wrap + 0x400, false, near_wrap + 0x400, true);
+  TEST_ASSERT_EQUAL(core::ScreenState::Bright, bl.state());
+}
+
 void test_backlight_host_asleep_overrides_playback(void) {
   // If the machine it sits beside is asleep or locked, so is this - even mid
   // track, and without waiting out any idle timer.
@@ -4800,6 +4857,10 @@ int main(int, char **) {
   RUN_TEST(test_backlight_dims_then_sleeps_when_idle_and_stopped);
   RUN_TEST(test_backlight_input_wakes_it_and_reports_the_wake);
   RUN_TEST(test_backlight_recent_input_beats_a_host_that_says_asleep);
+  RUN_TEST(test_backlight_locking_right_after_a_knob_turn_still_sleeps);
+  RUN_TEST(test_backlight_touch_after_the_lock_still_wins);
+  RUN_TEST(test_backlight_relocking_needs_input_after_the_NEW_transition);
+  RUN_TEST(test_backlight_lock_ordering_survives_the_millis_wrap);
   RUN_TEST(test_backlight_host_asleep_overrides_playback);
   RUN_TEST(test_backlight_survives_the_millis_wrap);
   RUN_TEST(test_hostlink_fails_open_before_any_heartbeat);

@@ -61,6 +61,13 @@ class Backlight {
  private:
   ScreenState state_ = ScreenState::Bright;
   bool just_woke_ = false;
+  // When host_asleep last became true. Input only overrides the host if it
+  // arrived AT OR AFTER this moment: input from before the lock is not a person
+  // vetoing it, it is just the last thing that happened before they walked
+  // away - and on a device whose knob is touched constantly, "recent input"
+  // without that ordering kept the screen on for 90 seconds after every lock.
+  bool was_host_asleep_ = false;
+  uint32_t asleep_since_ = 0;
 };
 
 }  // namespace core
