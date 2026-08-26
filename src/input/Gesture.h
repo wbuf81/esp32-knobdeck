@@ -37,6 +37,15 @@ class GestureRecognizer {
   // Feed every frame. Returns at most one gesture per call.
   Gesture update(bool touching, int x, int y, uint32_t now_ms);
 
+  // Where the CURRENT OR LAST touch began. This is the truth about what was
+  // tapped: gestures fire on release, when touchRead already reads false and
+  // the caller's coordinates have reset - the log's famous "tap at (0,0)".
+  // Origin rather than endpoint, deliberately: a button panel asks which
+  // target the gesture STARTED in, and a swipe that slides off a button still
+  // belongs to the button it began on. Stable until the next touch-down.
+  int tapX() const { return x0_; }
+  int tapY() const { return y0_; }
+
  private:
   bool down_ = false;
   bool long_fired_ = false;

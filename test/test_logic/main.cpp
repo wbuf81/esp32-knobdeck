@@ -3066,6 +3066,50 @@ void test_the_heap_floor_leaves_room_for_a_tls_handshake(void) {
 }
 
 
+
+void test_a_tap_reports_where_it_started(void) {
+  // The screen has been a gesture pad; the Teams screen makes it a BUTTON
+  // panel, and buttons need to know where the finger landed. The recognizer
+  // has recorded the down position since the beginning - the log's famous
+  // "tap at (0,0)" happened because gestures fire on RELEASE, when touchRead
+  // already reads false and the caller's coordinates have reset. The DOWN
+  // position is the truth about what was tapped.
+  input::GestureRecognizer g;
+  g.update(true, 90, 200, 1000);
+  g.update(true, 92, 201, 1050);
+  const input::Gesture out = g.update(false, 0, 0, 1100);
+  TEST_ASSERT_EQUAL(input::Gesture::Tap, out);
+  TEST_ASSERT_EQUAL_INT(90, g.tapX());
+  TEST_ASSERT_EQUAL_INT(200, g.tapY());
+}
+
+void test_tap_position_survives_until_the_next_touch(void) {
+  // The caller reads tapX() AFTER update() returned Tap, possibly frames
+  // later. It must not be clobbered by the not-touching frames in between.
+  input::GestureRecognizer g;
+  g.update(true, 250, 180, 1000);
+  g.update(false, 0, 0, 1080);
+  g.update(false, 0, 0, 2000);
+  g.update(false, 0, 0, 3000);
+  TEST_ASSERT_EQUAL_INT(250, g.tapX());
+  TEST_ASSERT_EQUAL_INT(180, g.tapY());
+  // A new touch moves it.
+  g.update(true, 40, 60, 4000);
+  TEST_ASSERT_EQUAL_INT(40, g.tapX());
+  TEST_ASSERT_EQUAL_INT(60, g.tapY());
+}
+
+void test_a_swipe_still_reports_its_origin_not_its_end(void) {
+  // Origin, deliberately: "which half did this gesture START in" is the
+  // question a button panel asks, and a swipe that ends off the button should
+  // still belong to the button it began on.
+  input::GestureRecognizer g;
+  g.update(true, 100, 180, 1000);
+  g.update(true, 200, 180, 1100);
+  g.update(false, 0, 0, 1150);
+  TEST_ASSERT_EQUAL_INT(100, g.tapX());
+}
+
 // ---------------------------------------------------------------------------
 // Player gesture routing
 // ---------------------------------------------------------------------------
@@ -4779,6 +4823,9 @@ int main(int, char **) {
   RUN_TEST(test_long_press_with_a_track_toggles_like);
   RUN_TEST(test_long_press_with_nothing_listening_gets_zoomies);
   RUN_TEST(test_long_press_with_a_device_but_no_track_still_refuses_visibly);
+  RUN_TEST(test_a_tap_reports_where_it_started);
+  RUN_TEST(test_tap_position_survives_until_the_next_touch);
+  RUN_TEST(test_a_swipe_still_reports_its_origin_not_its_end);
   RUN_TEST(test_no_gesture_routes_to_nothing);
   RUN_TEST(test_record_owns_every_pixel);
   RUN_TEST(test_record_drawn_in_bands_matches_full_frame);
