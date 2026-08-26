@@ -562,6 +562,11 @@ def build_body(token):
             fields.append(f"{k}={v}")
     for k, v in playback.items():
         fields.append(f"{k}={v}")
+    if os.environ.get("KNOB_LOG_BODY"):
+        # Diagnostic: the one hop nothing else can see is the literal bytes the
+        # LIVE process sends. Everything in-process tested right while the
+        # device stayed dark, so the disagreement lives in here or nowhere.
+        log("body: " + " ".join(f for f in fields if not f.startswith("tok")))
     return ("\n".join(fields) + "\n").encode("utf-8")
 
 
