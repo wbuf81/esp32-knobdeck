@@ -33,11 +33,26 @@ jobs:
           path: |
             ~/.platformio
             ~/.cache/pip
+            .pio/libdeps
           key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
           restore-keys: pio-${{ runner.os }}-
 
       - name: Install PlatformIO
         run: pip install --upgrade platformio
+
+      # Fetch the test framework separately and retry it. A run once hung here
+      # for two minutes and ERRORED with no test output at all - the registry
+      # was slow, not the code - and that is indistinguishable from a real
+      # failure in the summary. Pulling it out makes an infrastructure flake
+      # look like one.
+      - name: Pre-fetch test dependencies
+        run: |
+          for i in 1 2 3; do
+            pio pkg install -e test && exit 0
+            echo "attempt $i failed; retrying"
+            sleep 10
+          done
+          exit 1
 
       # env:native is the ONLY target that links SDL. env:test excludes
       # platform/desktop/SdlPresent.cpp and carries no -lSDL2, and env:esp32
