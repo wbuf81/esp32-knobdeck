@@ -189,6 +189,9 @@ def audio_and_playback():
     }
 
 
+_last_locked = None
+
+
 def screen_locked():
     """True when the screen is locked.
 

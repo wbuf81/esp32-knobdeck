@@ -336,6 +336,27 @@ class TestMainRefusesToRunUnconfigured(unittest.TestCase):
             self.assertEqual(m.main(), 1)
 
 
+
+class TestWholeBodySmoke(unittest.TestCase):
+    """build_body with only the SUBPROCESS boundary mocked.
+
+    The regression this guards: an edit deleted the module-level _last_locked
+    initializer. Every unit test passed, because they mock screen_locked - and
+    the helper then crash-looped under launchd on its first real beat, taking
+    volume control and the overlay down together. This test runs the real
+    functions end to end so a missing module-level name explodes HERE.
+    """
+
+    def test_a_full_body_builds_with_real_readers(self):
+        with mock.patch.object(m, "run", return_value="ok\n"), \
+             mock.patch.object(m, "osa", return_value="50\nfalse\nNORUN"):
+            body = m.build_body("tok").decode()
+        f = m.parse_response(body)
+        self.assertEqual(f["tok"], "tok")
+        self.assertIn("locked", f)
+        self.assertIn("out_vol", f)
+
+
 class TestBuildBody(unittest.TestCase):
     def setUp(self):
         self.locked = False
