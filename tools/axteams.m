@@ -28,6 +28,10 @@
 
 static int nodes = 0;
 static double deadline = 0;
+// Set when a cap stops the walk early. A truncated walk saying "no Leave
+// button" is not evidence of anything, and reporting it as a completed verdict
+// would bounce the device out of the Teams screen mid-call.
+static int overran = 0;
 
 static double now(void) {
   return [NSDate timeIntervalSinceReferenceDate];
@@ -65,7 +69,11 @@ static void classify(NSString *label) {
 }
 
 static void walk(AXUIElementRef el, int depth) {
-  if (depth > 30 || nodes > 25000 || now() > deadline) return;
+  if (nodes > 25000 || now() > deadline) {
+    overran = 1;
+    return;
+  }
+  if (depth > 30) return;
   nodes++;
   CFTypeRef role = NULL, desc = NULL, title = NULL;
   AXUIElementCopyAttributeValue(el, kAXRoleAttribute, &role);
@@ -114,6 +122,7 @@ int main(void) {
                                kCFBooleanTrue);
   deadline = now() + 0.9;  // the beat budget owns us; overrun degrades to unknown
   walk(app, 0);
-  printf("in_call=%d muted=%d camera=%d\n", g_in_call, g_muted, g_camera);
+  printf("ok=%d in_call=%d muted=%d camera=%d\n", overran ? 0 : 1, g_in_call,
+         g_muted, g_camera);
   return 0;
 }

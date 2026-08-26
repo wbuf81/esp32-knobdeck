@@ -466,19 +466,19 @@ def ax_teams_state():
     """
     global _axteams_grant_said
     if not os.access(AXTEAMS, os.X_OK):
-        return 0, -1, -1
+        return 0, 0, -1, -1
     try:
         out = subprocess.run([AXTEAMS], capture_output=True, text=True,
                              timeout=2)
     except (OSError, subprocess.SubprocessError):
-        return 0, -1, -1
+        return 0, 0, -1, -1
     if out.returncode == 3:
         if not _axteams_grant_said:
             _axteams_grant_said = True
             log("axteams lacks Accessibility; mute state will stay unknown "
                 "(System Settings -> Accessibility -> add tools/axteams)")
-        return 0, -1, -1
-    vals = {"in_call": 0, "muted": -1, "camera": -1}
+        return 0, 0, -1, -1
+    vals = {"ok": 0, "in_call": 0, "muted": -1, "camera": -1}
     for part in (out.stdout or "").split():
         k, _, v = part.partition("=")
         if k in vals:
@@ -486,10 +486,11 @@ def ax_teams_state():
                 vals[k] = int(v)
             except ValueError:
                 pass
-    return vals["in_call"], vals["muted"], vals["camera"]
+    return vals["ok"], vals["in_call"], vals["muted"], vals["camera"]
 
 
-def teams_fields(running, mic, cam, ax_in_call=0, ax_muted=-1, ax_camera=-1):
+def teams_fields(running, mic, cam, ax_ok=0, ax_in_call=0, ax_muted=-1,
+                 ax_camera=-1):
     """The in-call inference, pure so it is testable.
 
     Teams' own local API would not bind on this machine (the 8124 server never
@@ -505,12 +506,17 @@ def teams_fields(running, mic, cam, ax_in_call=0, ax_muted=-1, ax_camera=-1):
     Teams idles in the background reads as "in a Teams call". Disambiguating
     needs the socket or the accessibility tree - phase 2 either way.
     """
-    # AX truth outranks inference wherever it speaks. The tree KNOWS there is a
-    # call (a Leave button exists) and knows the mute label; the mic heuristic
-    # only knows something is capturing. Where the tree is silent - overrun,
-    # missing grant, non-English labels - the old inference still stands, and
-    # mute stays unknown rather than guessed.
-    in_call = ax_in_call == 1 or (running and mic == 1)
+    # AX truth outranks inference IN BOTH DIRECTIONS when its walk completed.
+    # The first version only let the tree say yes, so a lingering mic capture -
+    # Teams holds the mic after calls - kept the heuristic screaming "in a
+    # call" while the tree correctly said no, and the device sat on the meeting
+    # screen with no meeting. A completed walk that found no Leave button IS
+    # the verdict; the heuristic only fills genuine silence (no grant, walk
+    # overrun, non-English labels).
+    if ax_ok:
+        in_call = ax_in_call == 1
+    else:
+        in_call = running and mic == 1
     if mic < 0 and ax_in_call != 1:
         return {}
     if not running:
