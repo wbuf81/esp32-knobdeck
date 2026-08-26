@@ -381,10 +381,43 @@ def adjust_output_volume(delta):
         log(f"volume -> {target}")
 
 
+def _teams_keystroke(key, what):
+    """Toggle mute ('m') or camera ('o') by sending Teams its own shortcut.
+
+    The local device API never bound on this machine, so control goes the way a
+    human does it: activate Teams, press cmd-shift-M / cmd-shift-O. Activating
+    steals focus for a beat - acceptable mid-meeting, where Teams is usually
+    frontmost anyway.
+
+    Needs TWO one-time grants for /usr/bin/python3 (stable and Apple-signed, so
+    unlike volhud the grants survive forever): Automation -> System Events, and
+    Accessibility. Until granted, the osascript errors land in this log with
+    exact numbers - -1743 means approve the Automation prompt, -25211 or
+    "assistive access" means add python3 under Accessibility.
+    """
+    out = osa(
+        'tell application "Microsoft Teams" to activate\n'
+        "delay 0.15\n"
+        'tell application "System Events" to keystroke "%s" '
+        "using {command down, shift down}" % key
+    )
+    log(f"teams {what} keystroke {'sent' if out is not None else 'FAILED - see error above'}")
+
+
+def teams_toggle_mute(_):
+    _teams_keystroke("m", "mute-toggle")
+
+
+def teams_toggle_camera(_):
+    _teams_keystroke("o", "camera-toggle")
+
+
 # Only these keys are ever acted on. Adding a capability means adding an entry
 # here with a typed handler, not widening a hole.
 HANDLERS = {
     "adjust_output_volume": adjust_output_volume,
+    "teams_toggle_mute": teams_toggle_mute,
+    "teams_toggle_camera": teams_toggle_camera,
 }
 
 
@@ -514,8 +547,15 @@ def build_body(token):
     if out_muted is not None:
         fields.append(f"out_muted={1 if out_muted else 0}")
     watch_for_teams_api()
-    for k, v in teams_fields(teams_running(), *av_state()).items():
-        fields.append(f"{k}={v}")
+    if os.environ.get("KNOB_TEAMS_FORCE"):
+        # Test harness: pretend a call is live so the whole loop - screen
+        # switch, tap, toggle delivery, keystroke - can be exercised without
+        # scheduling a meeting. Never set in the LaunchAgent plist.
+        fields.append("teams_in_call=1")
+        fields.append("teams_camera=1")
+    else:
+        for k, v in teams_fields(teams_running(), *av_state()).items():
+            fields.append(f"{k}={v}")
     for k, v in playback.items():
         fields.append(f"{k}={v}")
     return ("\n".join(fields) + "\n").encode("utf-8")
