@@ -46,11 +46,13 @@ class TestVolumeAdjust(unittest.TestCase):
     def setUp(self):
         self.runs = []
         self.osa = []
+        m._hud_works = True      # probe already done and positive
+        m._volume = 50
+        self.addCleanup(lambda: (setattr(m, "_hud_works", None),
+                                 setattr(m, "_volume", None)))
         p1 = mock.patch.object(m, "run", side_effect=lambda a, **k: self.runs.append(a))
         p2 = mock.patch.object(m, "osa", side_effect=lambda s: self.osa.append(s))
-        # volhud present and executable: the HUD path.
-        p3 = mock.patch("os.access", return_value=True)
-        for p in (p1, p2, p3):
+        for p in (p1, p2):
             p.start()
             self.addCleanup(p.stop)
 
@@ -62,8 +64,7 @@ class TestVolumeAdjust(unittest.TestCase):
     def test_three_detents_are_three_keypresses(self):
         # A delta is a count of clicks, and the HUD steps once per press.
         m.adjust_output_volume("3")
-        self.assertEqual(len(self.runs), 3)
-        self.assertTrue(all(r[1] == "up" for r in self.runs))
+        self.assertEqual([r[1] for r in self.runs], ["up", "up", "up"])
 
     def test_a_negative_delta_presses_down(self):
         m.adjust_output_volume("-2")
@@ -91,108 +92,83 @@ class TestVolumeAdjust(unittest.TestCase):
         m.adjust_output_volume("9999")
         self.assertEqual(len(self.runs), 16)
 
-    def test_the_hud_path_does_not_also_set_the_volume(self):
-        # It reads the volume to VERIFY the effect, but must never fall through
-        # to setting it as well - that would move the volume twice per click.
-        m.adjust_output_volume("1")
-        self.assertEqual(
-            [s for s in self.osa if s.startswith("set volume")], [],
-            "must not fall back while volhud is actually working")
-
-
-class TestHudVerification(unittest.TestCase):
-    """volhud exits 0 even when macOS accepts the event and ignores it.
-
-    AXIsProcessTrusted says yes, the CGEvent converts, the post returns, and the
-    volume does not move. Trusting the mechanism logged "(HUD)" for an event that
-    went nowhere and left the volume uncontrollable while the log claimed
-    success. So the effect is verified instead.
-    """
-
-    def setUp(self):
-        m._hud_works = None
-        self.addCleanup(lambda: setattr(m, "_hud_works", None))
-        self.vol = 50
-        self.sets = []
-        self.presses = []
-
-        def fake_osa(script):
-            if "get volume settings" in script:
-                return str(self.vol)
-            if script.startswith("set volume"):
-                self.sets.append(script)
-            return ""
-
-        p1 = mock.patch.object(m, "osa", side_effect=fake_osa)
-        p2 = mock.patch.object(m, "run", side_effect=lambda a, **k: self.presses.append(a))
-        p3 = mock.patch("os.access", return_value=True)
-        for p in (p1, p2, p3):
-            p.start()
-            self.addCleanup(p.stop)
-
-    def test_an_inert_volhud_falls_back_to_setting_the_volume(self):
-        # volhud runs, volume does not move -> the fallback must still happen,
-        # or the knob does nothing at all.
+    def test_the_hud_path_makes_no_osascript_calls_at_all(self):
+        # THE responsiveness requirement. Each osascript is a process spawn of
+        # roughly a tenth of a second; the earlier version did read, press,
+        # settle, read, maybe set - about a second per click, during which more
+        # clicks piled up and applied in a lump. That is what made a slow knob
+        # feel like a wild one.
         m.adjust_output_volume("2")
-        self.assertEqual(len(self.presses), 2, "it should have tried")
-        self.assertEqual(len(self.sets), 1, "and then actually changed it")
-
-    def test_an_inert_volhud_is_not_retried_forever(self):
-        m.adjust_output_volume("1")
-        first = len(self.presses)
-        m.adjust_output_volume("1")
-        self.assertEqual(len(self.presses), first,
-                         "should stop trying once proven inert")
-        self.assertEqual(len(self.sets), 2, "but must keep working")
-
-    def test_a_working_volhud_is_trusted_thereafter(self):
-        # Make the volume move when volhud is pressed.
-        def moving(args, **k):
-            self.presses.append(args)
-            self.vol += 6 if args[1] == "up" else -6
-
-        with mock.patch.object(m, "run", side_effect=moving):
-            m.adjust_output_volume("1")
-            m.adjust_output_volume("1")
-        self.assertEqual(self.sets, [], "a working HUD must never fall back")
-        self.assertIs(m._hud_works, True)
+        self.assertEqual(self.osa, [])
 
 
-class TestVolumeAdjustFallback(unittest.TestCase):
-    """No volhud: change it silently rather than not at all."""
+class TestVolumeAdjustSilent(unittest.TestCase):
+    """No working HUD: one osascript per adjustment, from the cache."""
 
     def setUp(self):
         self.osa = []
-
-        def fake_osa(script):
-            self.osa.append(script)
-            if "get volume settings" in script:
-                return "50"
-            return ""
-
-        p1 = mock.patch.object(m, "osa", side_effect=fake_osa)
-        p2 = mock.patch.object(m, "run", side_effect=AssertionError("no binary"))
-        p3 = mock.patch("os.access", return_value=False)
-        for p in (p1, p2, p3):
+        m._hud_works = False
+        m._volume = 50
+        self.addCleanup(lambda: (setattr(m, "_hud_works", None),
+                                 setattr(m, "_volume", None)))
+        p1 = mock.patch.object(m, "osa", side_effect=lambda s: self.osa.append(s))
+        p2 = mock.patch.object(m, "run", side_effect=AssertionError("no presses"))
+        for p in (p1, p2):
             p.start()
             self.addCleanup(p.stop)
 
-    def test_falls_back_to_an_absolute_set(self):
-        # One step is 100/16 = 6.25 points, so +2 from 50 lands on about 62.
+    def test_exactly_one_osascript_per_adjustment(self):
+        # Not three. The reads were the delay.
         m.adjust_output_volume("2")
-        sets = [s for s in self.osa if s.startswith("set volume")]
-        self.assertEqual(len(sets), 1)
-        self.assertIn("62", sets[0])
+        self.assertEqual(len(self.osa), 1)
+        self.assertTrue(self.osa[0].startswith("set volume"))
 
-    def test_the_fallback_clamps_at_the_top(self):
+    def test_it_steps_by_sixteenths(self):
+        # macOS moves output volume in sixteenths, so +2 from 50 is about 62.
+        m.adjust_output_volume("2")
+        self.assertIn("62", self.osa[0])
+
+    def test_it_clamps_at_the_top(self):
         m.adjust_output_volume("16")
-        sets = [s for s in self.osa if s.startswith("set volume")]
-        self.assertIn("100", sets[0])
+        self.assertIn("100", self.osa[0])
 
-    def test_the_fallback_clamps_at_the_bottom(self):
+    def test_it_clamps_at_the_bottom(self):
         m.adjust_output_volume("-16")
-        sets = [s for s in self.osa if s.startswith("set volume")]
-        self.assertIn("0", sets[0])
+        self.assertIn("0", self.osa[0])
+
+    def test_successive_clicks_accumulate_from_the_cache(self):
+        # Without a cached value each click would have to read first, which is
+        # the spawn this design exists to avoid.
+        m.adjust_output_volume("1")
+        m.adjust_output_volume("1")
+        self.assertEqual(len(self.osa), 2)
+        self.assertIn("62", self.osa[1])
+
+    def test_a_no_op_target_is_not_sent(self):
+        # Already at the ceiling: do not spend a spawn saying so.
+        m._volume = 100
+        m.adjust_output_volume("1")
+        self.assertEqual(self.osa, [])
+
+
+class TestVolumeCacheSync(unittest.TestCase):
+    def setUp(self):
+        m._volume = None
+        self.addCleanup(lambda: setattr(m, "_volume", None))
+
+    def test_the_beat_refreshes_the_cache(self):
+        # The estimate can only drift for one beat, because every beat already
+        # reads the real volume for the body.
+        m.note_volume(33)
+        self.assertEqual(m._volume, 33)
+
+    def test_an_unknown_volume_does_not_poison_the_cache(self):
+        # -1 means the Mac did not report one. Caching that would make the next
+        # click compute from nonsense.
+        m.note_volume(40)
+        m.note_volume(-1)
+        m.note_volume(None)
+        self.assertEqual(m._volume, 40)
 
 
 class TestBeatVerification(unittest.TestCase):

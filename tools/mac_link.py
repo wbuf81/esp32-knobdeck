@@ -260,10 +260,57 @@ def _read_volume():
         return None
 
 
-# None = untried, True = confirmed moving the volume, False = proven inert.
+# The volume we believe the Mac is at.
+#
+# Cached rather than read per adjustment, because reading it was the delay. Each
+# osascript is a process spawn of roughly a tenth of a second, and the previous
+# version did read-press-settle-read-maybe-set: about a second per click, during
+# which further clicks piled up and then applied in a lump. That is what made a
+# slow knob feel like a wild one.
+#
+# It self-corrects for free: every beat already reads the real volume for the
+# body, and that refreshes this. So an estimate can only drift for one beat.
+_volume = None
+
+# None = not yet probed, True = confirmed to move the volume, False = inert.
+# Probed ONCE, not per click - the probe is what cost the settle delay.
 _hud_works = None
-# Consecutive misses. A list so the closure can mutate it without a global.
-_hud_misses = [0]
+
+
+def note_volume(actual):
+    """Called from the beat with the freshly read volume."""
+    global _volume
+    if actual is not None and actual >= 0:
+        _volume = actual
+
+
+def _probe_hud():
+    """Decide once whether the media-key path actually does anything.
+
+    volhud exits 0 even when macOS accepts the event and discards it -
+    AXIsProcessTrusted returns true, the CGEvent converts, the post returns, and
+    nothing moves. So the only honest test is whether the volume changed, and it
+    is worth a settle delay ONCE at startup rather than on every click.
+    """
+    global _hud_works
+    if not os.access(VOLHUD, os.X_OK):
+        _hud_works = False
+        log("volhud not built; using silent volume "
+            "(clang -framework Cocoa -o tools/volhud tools/volhud.m)")
+        return
+    before = _read_volume()
+    if before is None:
+        _hud_works = False
+        return
+    # Up then down, so the probe leaves the volume where it found it.
+    run([VOLHUD, "up"])
+    time.sleep(0.25)
+    mid = _read_volume()
+    run([VOLHUD, "down"])
+    _hud_works = mid is not None and mid != before
+    log("volhud moves the volume; using the native HUD" if _hud_works else
+        "volhud posts but nothing moves; using silent volume "
+        "(grant Accessibility to tools/volhud to get the HUD)")
 
 
 def adjust_output_volume(delta):
@@ -277,6 +324,7 @@ def adjust_output_volume(delta):
     trusted end of a channel that terminates in a synthetic keypress, and an
     allowlist is only as good as its argument checking.
     """
+    global _volume
     try:
         delta = int(delta)
     except (TypeError, ValueError):
@@ -286,56 +334,32 @@ def adjust_output_volume(delta):
         return
     delta = max(-16, min(16, delta))
 
-    global _hud_works
-    if _hud_works is not False and os.access(VOLHUD, os.X_OK):
+    if _hud_works is None:
+        _probe_hud()
+
+    if _hud_works:
         arg = "up" if delta > 0 else "down"
-        # VERIFY THE EFFECT, do not trust the mechanism. volhud exits 0 even
-        # when macOS accepts the event and ignores it - AXIsProcessTrusted says
-        # yes, the CGEvent converts, the post returns, and the volume does not
-        # move. Logging "(HUD)" off the binary merely existing was a lie that
-        # looked exactly like success, and it left the volume uncontrollable
-        # while the log said otherwise.
-        before = _read_volume()
-        rc = 0
         for _ in range(abs(delta)):
-            if run([VOLHUD, arg]) is None:
-                rc = 1  # non-zero exit; volhud says it is not permitted
-        # SETTLE before reading. The volume change is asynchronous, and reading
-        # straight after the presses catches the old value - which made a
-        # working HUD look inert after two clicks while three happened to take
-        # long enough. The verification's own race, not macOS's fault.
-        time.sleep(0.20)
-        after = _read_volume()
-
-        if rc == 0 and (before is None or after is None or before != after):
-            _hud_works = True
-            _hud_misses[0] = 0
-            log(f"volume {arg} x{abs(delta)} (HUD)")
-            return
-
-        # Nothing observable happened. Do NOT latch off a single miss: a slow
-        # read or a coalesced step would disable the good path permanently.
-        _hud_misses[0] += 1
-        if _hud_misses[0] < 3:
-            log(f"volhud no effect ({_hud_misses[0]}/3), using silent volume "
-                f"this time")
-        else:
-            if _hud_works is not False:
-                log("volhud posts but nothing moves; silent volume from now on "
-                    "(check Accessibility for tools/volhud)")
-            _hud_works = False
-
-    # No binary, or one that posts events macOS ignores. Change it silently
-    # rather than not at all. Absolute, because AppleScript has no relative
-    # form - which is exactly the round trip the delta protocol exists to
-    # avoid, so this really is the worse path, just not the useless one.
-    cur = _read_volume()
-    if cur is None:
-        log("volume unreadable; nothing done")
+            run([VOLHUD, arg])
+        # Track the estimate so the ring and the fallback stay close; the next
+        # beat corrects it anyway.
+        if _volume is not None:
+            _volume = max(0, min(100, int(round(_volume + delta * _STEP))))
+        log(f"volume {arg} x{abs(delta)}")
         return
-    target = max(0, min(100, int(round(cur + delta * _STEP))))
+
+    # Silent path: ONE osascript, from the cached value. No read, no settle.
+    if _volume is None:
+        _volume = _read_volume()
+        if _volume is None:
+            log("volume unreadable; nothing done")
+            return
+    target = max(0, min(100, int(round(_volume + delta * _STEP))))
+    if target == _volume:
+        return
+    _volume = target
     osa(f"set volume output volume {target}")
-    log(f"volume {cur} -> {target} (silent; build tools/volhud for the HUD)")
+    log(f"volume -> {target}")
 
 
 # Only these keys are ever acted on. Adding a capability means adding an entry
@@ -374,6 +398,7 @@ def build_body(token):
         return ("\n".join(fields) + "\n").encode("utf-8")
 
     vol, playback = audio_and_playback()
+    note_volume(vol)
     fields = [
         f"v={PROTOCOL_V}",
         f"tok={token}",
