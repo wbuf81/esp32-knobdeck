@@ -337,6 +337,87 @@ class TestMainRefusesToRunUnconfigured(unittest.TestCase):
 
 
 
+
+class TestBeatCost(unittest.TestCase):
+    """The delivery cadence IS the latency, and spawns are the cadence.
+
+    Measured: audio_and_playback costs ~200ms and ran on EVERY beat, so each
+    delivered command paid apply (127ms) + rebuild (200ms) + RTT - a ~360ms
+    cadence that made a spin land in lumps. The audio read is now TTL-cached:
+    the device only consumes sp_playing/sp_uri (for the 20s poll stretch) and
+    identity, none of which needs 1Hz sampling.
+    """
+
+    def setUp(self):
+        m._cache.clear()
+        m._volume = None
+        m._muted = None
+        self.addCleanup(lambda: (m._cache.clear(),
+                                 setattr(m, "_volume", None),
+                                 setattr(m, "_muted", None)))
+        self.reads = []
+        p1 = mock.patch.object(m, "audio_and_playback",
+                               side_effect=lambda: (self.reads.append(1) or
+                                                    (50, False, {})))
+        p2 = mock.patch.object(m, "screen_locked", return_value=False)
+        p3 = mock.patch.object(m, "computer_name", return_value="M")
+        for p in (p1, p2, p3):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_consecutive_beats_do_not_respawn_the_audio_read(self):
+        m.build_body("t")
+        m.build_body("t")
+        m.build_body("t")
+        self.assertEqual(len(self.reads), 1,
+                         "the 200ms spawn must not run per beat")
+
+    def test_the_cache_expires(self):
+        m.build_body("t")
+        base = m.time.monotonic()
+        with mock.patch.object(m.time, "monotonic",
+                               return_value=base + m.AUDIO_TTL_S + 1):
+            m.build_body("t")
+        self.assertEqual(len(self.reads), 2)
+
+    def test_a_fresh_adjust_beats_a_cached_volume(self):
+        # The trap the cache digs: after a knob turn, the cached audio tuple
+        # still holds the OLD volume, and blindly reporting it would resync the
+        # device's ring backwards - the oscillation bug reborn. out_vol must
+        # come from the adjust-maintained cache when there is one.
+        m.build_body("t")           # caches vol=50
+        m._volume = 62              # a turn happened since
+        f = m.parse_response(m.build_body("t").decode())
+        self.assertEqual(f["out_vol"], "62")
+
+    def test_a_stale_cached_read_does_not_clobber_the_volume_cache(self):
+        # note_volume must fire only when the producer actually RAN.
+        m.build_body("t")
+        m._volume = 62
+        m.build_body("t")           # served from cache
+        self.assertEqual(m._volume, 62)
+
+
+class TestOverlayBeforeSet(unittest.TestCase):
+    def test_the_panel_paints_before_the_osascript(self):
+        # The perceived delay is visual. The osascript takes ~110ms; the panel
+        # write takes none - so the panel goes FIRST, showing the target while
+        # the set is still in flight.
+        order = []
+        m._volume = 50
+        m._muted = False
+        self.addCleanup(lambda: (setattr(m, "_volume", None),
+                                 setattr(m, "_muted", None)))
+        with mock.patch.object(m, "osa",
+                               side_effect=lambda s: order.append("osa")), \
+             mock.patch.object(m, "_hud_send",
+                               side_effect=lambda s: order.append(s)):
+            m.adjust_output_volume("2")
+        self.assertEqual(order[0], "muted 0")
+        self.assertEqual(order[1], "volume 62")
+        self.assertEqual(order[2], "osa")
+
+
 class TestWholeBodySmoke(unittest.TestCase):
     """build_body with only the SUBPROCESS boundary mocked.
 

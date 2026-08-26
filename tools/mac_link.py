@@ -255,6 +255,14 @@ def screen_locked():
 # granted it, and never after the next rebuild.
 KNOBHUD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knobhud")
 
+# How stale the Spotify/audio read may be. The device consumes sp_playing and
+# sp_uri (for the 20s poll stretch) and identity - none of it needs 1Hz
+# sampling, and the read is the single most expensive spawn in the beat:
+# measured at ~200ms warm, ~550ms cold, ON EVERY BEAT. That spawn WAS the
+# volume delay - each delivered command paid apply+rebuild+RTT, a ~360ms
+# cadence that made a spin land in lumps.
+AUDIO_TTL_S = 2.0
+
 # macOS moves output volume in sixteenths, so one knob detent is 6.25 points.
 _STEP = 100.0 / 16.0
 
@@ -351,13 +359,16 @@ def adjust_output_volume(delta):
             return
 
     target = max(0, min(100, int(round(_volume + delta * _STEP))))
+    # Panel FIRST. The osascript takes ~110ms and the panel write takes none,
+    # so the screen shows the target while the set is still in flight - the
+    # perceived delay was mostly this ordering.
+    if _muted is not None:
+        _hud_send(f"muted {1 if _muted else 0}")
+    _hud_send(f"volume {target}")
     if target != _volume:
         _volume = target
         osa(f"set volume output volume {target}")
         log(f"volume -> {target}")
-    if _muted is not None:
-        _hud_send(f"muted {1 if _muted else 0}")
-    _hud_send(f"volume {_volume}")
 
 
 # Only these keys are ever acted on. Adding a capability means adding an entry
@@ -395,18 +406,28 @@ def build_body(token):
         ]
         return ("\n".join(fields) + "\n").encode("utf-8")
 
-    vol, muted, playback = audio_and_playback()
-    note_volume(vol, muted)
+    def _read_audio():
+        # note_volume fires ONLY on a real read. Calling it with a cached tuple
+        # would clobber the fresher value adjust_output_volume maintains, and
+        # reporting that stale number would resync the device's ring backwards -
+        # the oscillation bug reborn through the cache.
+        v, mu, pb = audio_and_playback()
+        note_volume(v, mu)
+        return v, mu, pb
+
+    vol, muted, playback = cached("audio", AUDIO_TTL_S, _read_audio)
+    out_vol = _volume if _volume is not None else vol
+    out_muted = _muted if _muted is not None else muted
     fields = [
         f"v={PROTOCOL_V}",
         f"tok={token}",
         "locked=0",
         f"host={name}",
         f"sp_device={name}",
-        f"out_vol={vol}",
+        f"out_vol={out_vol}",
     ]
-    if muted is not None:
-        fields.append(f"out_muted={1 if muted else 0}")
+    if out_muted is not None:
+        fields.append(f"out_muted={1 if out_muted else 0}")
     for k, v in playback.items():
         fields.append(f"{k}={v}")
     return ("\n".join(fields) + "\n").encode("utf-8")
