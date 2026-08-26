@@ -432,6 +432,10 @@ void loop() {
       if (g_volume < 0) g_volume = 0;
       if (g_volume > 100) g_volume = 100;
       g_hostlink.mac().requestOutputVolumeDelta(detents);
+      // The start-of-chain stamp for latency work: the serial reader timestamps
+      // this line's arrival on the same wall clock as the helper's log, so
+      // detent-to-apply is measurable end to end.
+      LOGF("knob->mac %+d", detents);
       // Long enough for the command to reach the Mac and for the NEXT beat to
       // carry the result back: one hold plus a beat, with room to spare.
       g_mac_vol_settle.arm(now, 3000);

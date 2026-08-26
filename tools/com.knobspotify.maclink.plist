@@ -15,12 +15,16 @@
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <!-- mDNS first, with an IP fallback for the window right after a flash
-         when the device's responder has not registered yet. Because the name
-         leads, a DHCP lease moving needs no change here and no static lease on
-         the router. -->
+    <!-- IP FIRST, name as the fallback - the reverse burned us. The ESP32's
+         mDNS answers so slowly that every resolve costs ~5.4 seconds, and
+         because it eventually SUCCEEDS it never errors, never rotates, and
+         silently taxes every single beat: commands that should deliver in
+         ~150ms delivered every 5.5s, measured end to end with timestamps on
+         both sides. The name stays as the fallback so a DHCP lease moving
+         degrades to slow instead of dead - and the log says which host is in
+         use either way. -->
     <key>KNOB_HOST</key>
-    <string>knobspotify.local,REPLACE_WITH_DEVICE_IP</string>
+    <string>REPLACE_WITH_DEVICE_IP,knobspotify.local</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

@@ -50,7 +50,11 @@ BACKOFF_MAX_S = 30.0
 
 
 def log(msg):
-    print(f"[maclink] {msg}", file=sys.stderr, flush=True)
+    # Milliseconds since midnight - enough to measure hops, cheap to read.
+    t = time.time()
+    ms = int(t * 1000) % 86400000
+    print(f"[maclink {ms//3600000:02d}:{ms//60000%60:02d}:{ms//1000%60:02d}"
+          f".{ms%1000:03d}] {msg}", file=sys.stderr, flush=True)
 
 
 def read_token():
@@ -504,6 +508,9 @@ def beat(token):
     for key, value in fields.items():
         handler = HANDLERS.get(key)
         if handler:
+            # The receipt timestamp splits the pipeline: delay BEFORE this line
+            # lives on the device/network/hold side, delay after it is apply.
+            log(f"cmd {key}={value}")
             handler(value)
 
 
@@ -513,6 +520,11 @@ def main():
         log("no token; set KNOB_TOKEN or write ~/.config/knob-spotify/token")
         return 1
     log(f"starting, hosts={','.join(HOSTS)}")
+    # Warm the overlay now, not on the first click: a Cocoa app takes ~half a
+    # second to launch, and lazily paying that on the first turn showed up as
+    # "very delayed to show up on first instance". "muted 0" initialises state
+    # without showing the panel.
+    _hud_send("muted 0")
     backoff = BACKOFF_START_S
     while True:
         try:

@@ -95,10 +95,28 @@
 }
 
 - (void)show {
-  fprintf(stderr, "[knobhud] show vol=%d muted=%d\n", self.view.volume,
-          self.view.muted);
-  fflush(stderr);
+  // Reposition on EVERY show. The frame was computed once at init, from
+  // whichever screen was main at spawn - fine on a single fixed display, wrong
+  // the moment arrangements, docks or resolutions change under a long-lived
+  // process. Recomputing costs nothing and removes the whole class.
+  NSRect vis = [NSScreen mainScreen].visibleFrame;
+  [self.window setFrame:NSMakeRect(NSMidX(vis) - 120, vis.origin.y + 90, 240, 58)
+                display:YES];
   [self.window orderFrontRegardless];
+  // The ledger's "show" only proved we ASKED. occlusionState is macOS's own
+  // answer to whether the user can actually see it, so log that instead -
+  // checked a beat later because occlusion is updated asynchronously.
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                 dispatch_get_main_queue(), ^{
+    NSRect f = self.window.frame;
+    fprintf(stderr,
+            "[knobhud] show vol=%d muted=%d frame=(%.0f,%.0f) visible=%d "
+            "occluded=%d\n",
+            self.view.volume, self.view.muted, f.origin.x, f.origin.y,
+            self.window.isVisible ? 1 : 0,
+            (self.window.occlusionState & NSWindowOcclusionStateVisible) ? 0 : 1);
+    fflush(stderr);
+  });
   [self.hide invalidate];
   self.hide = [NSTimer scheduledTimerWithTimeInterval:1.4
                                               repeats:NO
@@ -115,7 +133,12 @@
   // to /tmp/knob-maclink.log. This is the receive-side half of a ledger whose
   // send side the helper already writes, so the next real knob turn documents
   // itself end to end with no timing choreography: wrote / received / painted.
-  fprintf(stderr, "[knobhud] recv %s\n", line.UTF8String);
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  long ms = (ts.tv_sec % 86400) * 1000 + ts.tv_nsec / 1000000;
+  fprintf(stderr, "[knobhud %02ld:%02ld:%02ld.%03ld] recv %s\n",
+          ms / 3600000, ms / 60000 % 60, ms / 1000 % 60, ms % 1000,
+          line.UTF8String);
   fflush(stderr);
   NSArray<NSString *> *parts =
       [line componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
