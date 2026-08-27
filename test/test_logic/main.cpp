@@ -4241,6 +4241,31 @@ void test_teams_screen_is_bit_exact_across_runs(void) {
   TEST_ASSERT_EQUAL_INT(0, diffs);
 }
 
+void test_teams_screen_camera_speaks_the_mic_colour_language(void) {
+  // One grammar for both halves: on-air is red, calm is green. A camera that
+  // is ON glows hot like a live mic; a camera that is OFF rests in the same
+  // green-dark as muted. Sampled from the half's gradient, clear of the icon.
+  gfx::Framebuffer on, off;
+  on.fill(0);
+  off.fill(0);
+  views::TeamsScreen a, b;
+  a.begin();
+  b.begin();
+  a.prepare(1, 1, false, false, 10);
+  b.prepare(1, 0, false, false, 10);
+  gfx::Surface sa = fullSurface(on);
+  gfx::Surface sb = fullSurface(off);
+  a.renderBand(sa);
+  b.renderBand(sb);
+  uint8_t r, g, bl;
+  gfx::unpack565(on.at(330, 150), r, g, bl);   // brightest row, clear of icon
+  TEST_ASSERT_TRUE(r > g + 20);                // hot: red past both
+  TEST_ASSERT_TRUE(r > bl + 20);
+  gfx::unpack565(off.at(330, 150), r, g, bl);
+  TEST_ASSERT_TRUE(g > r);                     // calm: green-forward
+  TEST_ASSERT_TRUE(g > bl);
+}
+
 void test_teams_screen_fits_in_internal_ram_next_to_the_tls_stack(void) {
   // The vibe layer flashed, rendered at 121 fps, and silently killed Spotify:
   // a second 1000-slot particle pool in BSS took ~38KB of internal RAM and
@@ -5349,6 +5374,7 @@ int main(int, char **) {
   RUN_TEST(test_teams_screen_with_particles_drawn_in_bands_matches_full_frame);
   RUN_TEST(test_teams_screen_is_bit_exact_across_runs);
   RUN_TEST(test_teams_screen_fits_in_internal_ram_next_to_the_tls_stack);
+  RUN_TEST(test_teams_screen_camera_speaks_the_mic_colour_language);
   RUN_TEST(test_swipe_down_during_a_call_returns_to_the_meeting);
   RUN_TEST(test_swipe_down_without_a_call_still_opens_the_queue);
   RUN_TEST(test_swipe_down_on_the_dog_during_a_call_goes_to_the_meeting);

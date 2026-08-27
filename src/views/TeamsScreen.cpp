@@ -77,9 +77,11 @@ HalfStyle micStyle(int muted) {
 }
 
 HalfStyle camStyle(int camera) {
+  // Same grammar as the mic, deliberately: on-air is red and loud, calm is
+  // green and dark, one colour language across the whole glance.
   if (camera < 0) return {70, 70, 84, false, false};
-  if (camera == 1) return {30, 44, 88, false, true};  // on-air blue
-  return {30, 32, 40, true, false};                   // off: near-dark
+  if (camera == 1) return {120, 26, 26, false, true};  // on-air: red, loud
+  return {24, 46, 30, true, false};                    // off: calm green-dark
 }
 
 void fillHalfRow(uint16_t *row, int x0, int x1, int y, const HalfStyle &st,
@@ -138,32 +140,27 @@ namespace {
 
 // Burst palettes. Going on-air is loud; going calm is quiet - the particle
 // grammar matches the colour grammar of the halves themselves.
-fx::SpawnParams burstParams(bool mic, int dir) {
+fx::SpawnParams burstParams(int dir) {
   fx::SpawnParams p;
-  p.spread = 10.0f;
-  p.speed_min = 26.0f;
-  p.speed_max = 70.0f;
-  p.life_min = 0.5f;
-  p.life_max = 1.4f;
-  p.size_min = 1.0f;
-  p.size_max = 2.4f;
+  p.spread = 12.0f;
+  p.speed_min = 34.0f;
+  p.speed_max = 90.0f;
+  p.life_min = 0.7f;
+  p.life_max = 1.8f;
+  p.size_min = 2.2f;
+  p.size_max = 4.6f;
   p.drag = 0.30f;
-  if (mic && dir > 0) {          // mic went LIVE: hot
+  // The camera speaks the mic's colour language: going on-air is a hot red
+  // detonation whichever half it happens on, going calm is green.
+  if (dir > 0) {
     p.colors[0] = gfx::rgb565(255, 80, 60);
     p.colors[1] = gfx::rgb565(255, 160, 60);
     p.colors[2] = gfx::rgb565(255, 230, 200);
     p.color_count = 3;
-  } else if (mic) {              // muted: calm greens
-    p.colors[0] = gfx::rgb565(60, 180, 90);
-    p.colors[1] = gfx::rgb565(30, 110, 60);
+  } else {
+    p.colors[0] = gfx::rgb565(70, 220, 110);
+    p.colors[1] = gfx::rgb565(140, 255, 170);
     p.color_count = 2;
-  } else if (dir > 0) {          // camera on: on-air blues
-    p.colors[0] = gfx::rgb565(90, 140, 255);
-    p.colors[1] = gfx::rgb565(180, 210, 255);
-    p.color_count = 2;
-  } else {                       // camera off: a grey puff
-    p.colors[0] = gfx::rgb565(120, 120, 132);
-    p.color_count = 1;
   }
   return p;
 }
@@ -177,11 +174,11 @@ fx::SpawnParams swirlParams() {
   p.speed_max = 80.0f;
   p.life_min = 0.6f;
   p.life_max = 1.1f;
-  p.size_min = 1.0f;
-  p.size_max = 1.8f;
+  p.size_min = 2.0f;
+  p.size_max = 3.2f;
   p.drag = 0.65f;
-  p.colors[0] = gfx::rgb565(200, 200, 220);
-  p.colors[1] = gfx::rgb565(120, 130, 170);
+  p.colors[0] = gfx::rgb565(230, 230, 250);
+  p.colors[1] = gfx::rgb565(150, 160, 210);
   p.color_count = 2;
   return p;
 }
@@ -191,17 +188,17 @@ fx::SpawnParams swirlParams() {
 fx::SpawnParams emberParams() {
   fx::SpawnParams p;
   p.spread = 4.0f;
-  p.speed_min = 3.0f;
-  p.speed_max = 14.0f;
+  p.speed_min = 4.0f;
+  p.speed_max = 18.0f;
   p.life_min = 1.4f;
   p.life_max = 2.8f;
-  p.size_min = 1.0f;
-  p.size_max = 2.0f;
+  p.size_min = 1.8f;
+  p.size_max = 3.4f;
   p.drag = 0.90f;
-  p.gravity_y = -26.0f;
-  p.colors[0] = gfx::rgb565(255, 90, 50);
-  p.colors[1] = gfx::rgb565(255, 150, 60);
-  p.colors[2] = gfx::rgb565(180, 50, 30);
+  p.gravity_y = -32.0f;
+  p.colors[0] = gfx::rgb565(255, 110, 60);
+  p.colors[1] = gfx::rgb565(255, 180, 80);
+  p.colors[2] = gfx::rgb565(230, 70, 40);
   p.color_count = 3;
   return p;
 }
@@ -243,21 +240,21 @@ void TeamsScreen::prepare(int muted, int camera, bool mic_pending,
 
 void TeamsScreen::update(float dt, core::Rng &rng) {
   if (mic_flip_) {
-    parts_.configure(burstParams(true, mic_flip_));
+    parts_.configure(burstParams(mic_flip_));
     parts_.setOrigin(MIC_CX, ICON_CY);
-    parts_.burst(mic_flip_ > 0 ? 90 : 36, mic_flip_ > 0 ? 1.0f : 0.55f, rng);
+    parts_.burst(mic_flip_ > 0 ? 120 : 60, mic_flip_ > 0 ? 1.2f : 0.7f, rng);
     mic_flip_ = 0;
   }
   if (cam_flip_) {
-    parts_.configure(burstParams(false, cam_flip_));
+    parts_.configure(burstParams(cam_flip_));
     parts_.setOrigin(CAM_CX, ICON_CY);
-    parts_.burst(cam_flip_ > 0 ? 60 : 24, cam_flip_ > 0 ? 0.8f : 0.5f, rng);
+    parts_.burst(cam_flip_ > 0 ? 100 : 50, cam_flip_ > 0 ? 1.1f : 0.65f, rng);
     cam_flip_ = 0;
   }
   if (muted_ == 0) {
     // Emission is metered in ember-per-second, accumulated against dt, so the
     // field's density does not depend on the frame rate.
-    ember_acc_ += dt * 45.0f;
+    ember_acc_ += dt * 60.0f;
     while (ember_acc_ >= 1.0f) {
       ember_acc_ -= 1.0f;
       parts_.configure(emberParams());
@@ -270,7 +267,7 @@ void TeamsScreen::update(float dt, core::Rng &rng) {
     ember_acc_ = 0.0f;
   }
   if (mic_pending_ || cam_pending_) {
-    swirl_acc_ += dt * 40.0f;
+    swirl_acc_ += dt * 55.0f;
     while (swirl_acc_ >= 1.0f) {
       swirl_acc_ -= 1.0f;
       parts_.configure(swirlParams());
