@@ -892,6 +892,8 @@ void loop() {
                     g_mic_pending.pending(now), g_cam_pending.pending(now),
                     fresh ? static_cast<int>((now - g_call_started_ms) / 1000)
                           : -1);
+    // The vibe layer: flip bursts, the live-mic ember field, pending swirls.
+    g_teams.update(dt, g_rng);
   }
   if (g_screen == Screen::Player) {
     g_nowplaying.prepare(st.pb, shown_progress, g_toast.visible());

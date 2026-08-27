@@ -708,6 +708,57 @@ void test_particles_are_deterministic_for_a_seed(void) {
   TEST_ASSERT_EQUAL_INT(0, diffs);
 }
 
+void test_particles_implode_converges_on_the_origin(void) {
+  // Spawned on a ring around the origin with inward velocity: after a step of
+  // time the field must be closer to the origin than where it started, or the
+  // "converging" swirl is just another outward burst wearing a different name.
+  fx::Particles p;
+  fx::SpawnParams sp;
+  sp.x = 90.0f;
+  sp.y = 150.0f;
+  sp.spread = 0.0f;
+  sp.speed_min = 40.0f;
+  sp.speed_max = 60.0f;
+  sp.life_min = 2.0f;
+  sp.life_max = 2.0f;
+  sp.drag = 1.0f;
+  sp.colors[0] = 0xFFFF;
+  sp.color_count = 1;
+  p.configure(sp);
+  core::Rng rng(11);
+  const float R = 70.0f;
+  p.implode(40, R, rng);
+  TEST_ASSERT_EQUAL_INT(40, p.live());
+
+  // Positions are private; the rendered pixels are the observable. Average
+  // lit-pixel distance from the origin must shrink as the swirl converges.
+  auto avg_dist = [](gfx::Framebuffer &fb) {
+    double sum = 0.0;
+    int n = 0;
+    for (int y = 0; y < gfx::H; ++y)
+      for (int x = 0; x < gfx::W; ++x)
+        if (fb.at(x, y) != 0) {
+          const double dx = x - 90.0, dy = y - 150.0;
+          sum += std::sqrt(dx * dx + dy * dy);
+          ++n;
+        }
+    return n > 0 ? sum / n : -1.0;
+  };
+  gfx::Framebuffer f0, f1;
+  f0.fill(0);
+  f1.fill(0);
+  gfx::Surface s0 = fullSurface(f0);
+  p.render(s0);
+  const double before = avg_dist(f0);
+  TEST_ASSERT_TRUE(before > R - 6.0);  // spawned on the ring, not the centre
+  p.update(0.5f);
+  gfx::Surface s1 = fullSurface(f1);
+  p.render(s1);
+  const double after = avg_dist(f1);
+  TEST_ASSERT_TRUE(after >= 0.0);
+  TEST_ASSERT_TRUE(after < before - 10.0);
+}
+
 void test_particles_off_screen_write_nothing(void) {
   fx::Particles p;
   fx::SpawnParams sp;
@@ -4019,6 +4070,199 @@ void test_teams_screen_pending_renders_differently_from_settled(void) {
   TEST_ASSERT_TRUE(diffs > 1000);
 }
 
+void test_teams_screen_confirmed_flip_bursts_particles(void) {
+  // The vibe layer's rule: a burst fires when Teams ECHOES a real state change,
+  // known to known. Camera flip with a muted mic isolates the burst from the
+  // live-mic ambient field.
+  views::TeamsScreen t;
+  t.begin();
+  core::Rng rng(5);
+  t.prepare(1, 0, false, false, 10);  // settle: muted, camera off
+  t.update(0.016f, rng);
+  TEST_ASSERT_EQUAL_INT(0, t.liveParticles());
+  t.prepare(1, 1, false, false, 11);  // Teams echoes: camera on
+  t.update(0.016f, rng);
+  TEST_ASSERT_TRUE(t.liveParticles() > 0);
+}
+
+void test_teams_screen_live_mic_breathes_and_muted_is_still(void) {
+  // While the mic is LIVE the screen carries a quiet ember field - alive, not
+  // static. Muted is the resting state and must be perfectly still.
+  views::TeamsScreen live, muted;
+  live.begin();
+  muted.begin();
+  core::Rng r1(7), r2(8);
+  for (int f = 0; f < 60; ++f) {
+    live.prepare(0, 1, false, false, f);   // unknown->known: no burst
+    live.update(1.0f / 30.0f, r1);
+    muted.prepare(1, 1, false, false, f);
+    muted.update(1.0f / 30.0f, r2);
+  }
+  TEST_ASSERT_TRUE(live.liveParticles() > 10);
+  TEST_ASSERT_EQUAL_INT(0, muted.liveParticles());
+}
+
+void test_teams_screen_pending_swirls_particles(void) {
+  // Waiting for Teams to echo a toggle should look alive, not broken: the
+  // pending half runs a converging swirl. Muted mic keeps the ambient field
+  // out of the count, so any particle here belongs to the swirl.
+  views::TeamsScreen t;
+  t.begin();
+  core::Rng rng(9);
+  t.prepare(1, 1, false, false, 10);
+  t.update(1.0f / 30.0f, rng);
+  TEST_ASSERT_EQUAL_INT(0, t.liveParticles());
+  for (int f = 0; f < 30; ++f) {
+    t.prepare(1, 1, true, false, 11);
+    t.update(1.0f / 30.0f, rng);
+  }
+  TEST_ASSERT_TRUE(t.liveParticles() > 5);
+}
+
+void test_teams_screen_particles_actually_render(void) {
+  // The project's oldest trap is a sensor with no actuator: a particle pool
+  // that updates but never draws would pass every count test and show nothing.
+  // Two identical screens, one with a burst mid-flight - the frames must
+  // differ.
+  gfx::Framebuffer calm, bursting;
+  calm.fill(0);
+  bursting.fill(0);
+  views::TeamsScreen a, b;
+  a.begin();
+  b.begin();
+  core::Rng r1(12), r2(12);
+  // Both screens end settled in the SAME state (muted, camera off) at the
+  // same call second; b's camera flipped on and back off along the way, so
+  // only its in-flight burst particles can distinguish the frames.
+  a.prepare(1, 0, false, false, 10);
+  a.update(1.0f / 30.0f, r1);
+  b.prepare(1, 0, false, false, 10);
+  b.update(1.0f / 30.0f, r2);
+  b.prepare(1, 1, false, false, 11);  // camera flips on: burst
+  b.update(1.0f / 30.0f, r2);
+  a.prepare(1, 0, false, false, 11);
+  a.update(1.0f / 30.0f, r1);
+  b.prepare(1, 0, false, false, 12);  // and back off: settled like a
+  b.update(1.0f / 30.0f, r2);
+  a.prepare(1, 0, false, false, 12);
+  a.update(1.0f / 30.0f, r1);
+  gfx::Surface sa = fullSurface(calm);
+  gfx::Surface sb = fullSurface(bursting);
+  a.renderBand(sa);
+  b.renderBand(sb);
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (calm.at(x, y) != bursting.at(x, y)) ++diffs;
+  TEST_ASSERT_TRUE(diffs > 50);
+}
+
+void test_teams_screen_timer_arc_tracks_the_call(void) {
+  // A thin rim arc grows with the call: half an hour in, half a lap. Two
+  // settled screens differing only in call_s must differ out at the rim.
+  gfx::Framebuffer young, old;
+  young.fill(0);
+  old.fill(0);
+  views::TeamsScreen a, b;
+  a.begin();
+  b.begin();
+  a.prepare(1, 1, false, false, 5);
+  b.prepare(1, 1, false, false, 1800);
+  gfx::Surface sa = fullSurface(young);
+  gfx::Surface sb = fullSurface(old);
+  a.renderBand(sa);
+  b.renderBand(sb);
+  int rim_diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x) {
+      if (young.at(x, y) == old.at(x, y)) continue;
+      const double dx = x - gfx::CX, dy = y - gfx::CY;
+      const double r = std::sqrt(dx * dx + dy * dy);
+      if (r > 160.0) ++rim_diffs;
+    }
+  TEST_ASSERT_TRUE(rim_diffs > 100);
+}
+
+void test_teams_screen_with_particles_drawn_in_bands_matches_full_frame(void) {
+  // The oldest invariant, re-checked with the vibe layer live: a burst, the
+  // ember field and the timer arc must render byte-identical banded vs whole.
+  gfx::Framebuffer whole, banded;
+  whole.fill(0);
+  banded.fill(0);
+  views::TeamsScreen a, b;
+  a.begin();
+  b.begin();
+  core::Rng r1(21), r2(21);
+  for (int f = 0; f < 20; ++f) {
+    const int muted = f < 10 ? 1 : 0;  // a mid-run unmute: burst plus embers
+    a.prepare(muted, 1, false, false, 60 + f);
+    a.update(1.0f / 30.0f, r1);
+    b.prepare(muted, 1, false, false, 60 + f);
+    b.update(1.0f / 30.0f, r2);
+  }
+  gfx::Surface s = fullSurface(whole);
+  a.renderBand(s);
+  for (int y = 0; y < gfx::H; y += 20) {
+    gfx::Surface bs;
+    bs.px = banded.pixels() + static_cast<size_t>(y) * gfx::W;
+    bs.w = gfx::W;
+    bs.h = 20;
+    bs.y0 = y;
+    b.renderBand(bs);
+  }
+  int diffs = 0;
+  for (int y = 0; y < gfx::H; ++y)
+    for (int x = 0; x < gfx::W; ++x)
+      if (whole.at(x, y) != banded.at(x, y)) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+void test_teams_screen_is_bit_exact_across_runs(void) {
+  // Effects take dt and a seed, never a clock; two identical runs must land
+  // on identical pixels or the headless pixel tests go flaky.
+  gfx::Framebuffer a, b;
+  a.fill(0);
+  b.fill(0);
+  for (int pass = 0; pass < 2; ++pass) {
+    views::TeamsScreen t;
+    t.begin();
+    core::Rng rng(33);
+    for (int f = 0; f < 25; ++f) {
+      t.prepare(f < 12 ? 1 : 0, 1, f > 20, false, 30 + f);
+      t.update(1.0f / 30.0f, rng);
+    }
+    gfx::Framebuffer &fb = pass == 0 ? a : b;
+    gfx::Surface s = fullSurface(fb);
+    t.renderBand(s);
+  }
+  int diffs = 0;
+  for (size_t i = 0; i < gfx::Framebuffer::count(); ++i)
+    if (a.pixels()[i] != b.pixels()[i]) ++diffs;
+  TEST_ASSERT_EQUAL_INT(0, diffs);
+}
+
+void test_teams_screen_fits_in_internal_ram_next_to_the_tls_stack(void) {
+  // The vibe layer flashed, rendered at 121 fps, and silently killed Spotify:
+  // a second 1000-slot particle pool in BSS took ~38KB of internal RAM and
+  // every TLS handshake after it failed with MEMORY ALLOCATION FAILED. The
+  // Teams pool must stay small - its worst case is a burst plus the ember
+  // field plus a swirl, about 250 live.
+  TEST_ASSERT_TRUE(sizeof(views::TeamsScreen) < 16 * 1024);
+}
+
+void test_teams_screen_unknown_transitions_burst_nothing(void) {
+  // Unknown -> known is the link finding its feet, not a user action; a burst
+  // there would celebrate a reconnect as if someone had toggled something.
+  views::TeamsScreen t;
+  t.begin();
+  core::Rng rng(6);
+  t.prepare(-1, -1, false, false, -1);
+  t.update(0.016f, rng);
+  t.prepare(1, 1, false, false, 5);  // link arrives: still no burst
+  t.update(0.016f, rng);
+  TEST_ASSERT_EQUAL_INT(0, t.liveParticles());
+}
+
 // ---------------------------------------------------------------------------
 // Teams routing
 // ---------------------------------------------------------------------------
@@ -4951,6 +5195,7 @@ int main(int, char **) {
   RUN_TEST(test_particles_pool_is_capped_and_does_not_overflow);
   RUN_TEST(test_particles_expire);
   RUN_TEST(test_particles_are_deterministic_for_a_seed);
+  RUN_TEST(test_particles_implode_converges_on_the_origin);
   RUN_TEST(test_particles_off_screen_write_nothing);
   RUN_TEST(test_particles_render_additively_over_a_background);
   RUN_TEST(test_procedural_stays_in_range);
@@ -5095,6 +5340,15 @@ int main(int, char **) {
   RUN_TEST(test_teams_screen_live_mic_looks_different_from_muted);
   RUN_TEST(test_teams_screen_unknown_renders_differently_from_both);
   RUN_TEST(test_teams_screen_pending_renders_differently_from_settled);
+  RUN_TEST(test_teams_screen_confirmed_flip_bursts_particles);
+  RUN_TEST(test_teams_screen_unknown_transitions_burst_nothing);
+  RUN_TEST(test_teams_screen_live_mic_breathes_and_muted_is_still);
+  RUN_TEST(test_teams_screen_pending_swirls_particles);
+  RUN_TEST(test_teams_screen_particles_actually_render);
+  RUN_TEST(test_teams_screen_timer_arc_tracks_the_call);
+  RUN_TEST(test_teams_screen_with_particles_drawn_in_bands_matches_full_frame);
+  RUN_TEST(test_teams_screen_is_bit_exact_across_runs);
+  RUN_TEST(test_teams_screen_fits_in_internal_ram_next_to_the_tls_stack);
   RUN_TEST(test_swipe_down_during_a_call_returns_to_the_meeting);
   RUN_TEST(test_swipe_down_without_a_call_still_opens_the_queue);
   RUN_TEST(test_swipe_down_on_the_dog_during_a_call_goes_to_the_meeting);

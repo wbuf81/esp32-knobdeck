@@ -6,6 +6,7 @@
 #include "gfx/Font.h"
 #include "gfx/Geometry.h"
 #include "gfx/fonts/Fonts.h"
+#include "shell/RadialShell.h"
 
 namespace views {
 namespace {
@@ -124,25 +125,168 @@ void drawIconRow(uint16_t *row, int y, int cx, const uint16_t *icon,
 
 }  // namespace
 
+// Icon centrelines: where bursts and swirls anchor.
+constexpr float MIC_CX = static_cast<float>(gfx::CX) / 2.0f;
+constexpr float CAM_CX = static_cast<float>(gfx::CX) + gfx::CX / 2.0f;
+constexpr float ICON_CY = 150.0f;
+
+// The call-length arc rides the same groove as the player's progress ring.
+constexpr int ARC_R = 170;
+constexpr int ARC_THICK = 3;
+
+namespace {
+
+// Burst palettes. Going on-air is loud; going calm is quiet - the particle
+// grammar matches the colour grammar of the halves themselves.
+fx::SpawnParams burstParams(bool mic, int dir) {
+  fx::SpawnParams p;
+  p.spread = 10.0f;
+  p.speed_min = 26.0f;
+  p.speed_max = 70.0f;
+  p.life_min = 0.5f;
+  p.life_max = 1.4f;
+  p.size_min = 1.0f;
+  p.size_max = 2.4f;
+  p.drag = 0.30f;
+  if (mic && dir > 0) {          // mic went LIVE: hot
+    p.colors[0] = gfx::rgb565(255, 80, 60);
+    p.colors[1] = gfx::rgb565(255, 160, 60);
+    p.colors[2] = gfx::rgb565(255, 230, 200);
+    p.color_count = 3;
+  } else if (mic) {              // muted: calm greens
+    p.colors[0] = gfx::rgb565(60, 180, 90);
+    p.colors[1] = gfx::rgb565(30, 110, 60);
+    p.color_count = 2;
+  } else if (dir > 0) {          // camera on: on-air blues
+    p.colors[0] = gfx::rgb565(90, 140, 255);
+    p.colors[1] = gfx::rgb565(180, 210, 255);
+    p.color_count = 2;
+  } else {                       // camera off: a grey puff
+    p.colors[0] = gfx::rgb565(120, 120, 132);
+    p.color_count = 1;
+  }
+  return p;
+}
+
+// The pending swirl: spawned on a ring around the icon, converging inward -
+// the wait for Teams' echo drawn as the state being pulled together.
+fx::SpawnParams swirlParams() {
+  fx::SpawnParams p;
+  p.spread = 6.0f;
+  p.speed_min = 40.0f;
+  p.speed_max = 80.0f;
+  p.life_min = 0.6f;
+  p.life_max = 1.1f;
+  p.size_min = 1.0f;
+  p.size_max = 1.8f;
+  p.drag = 0.65f;
+  p.colors[0] = gfx::rgb565(200, 200, 220);
+  p.colors[1] = gfx::rgb565(120, 130, 170);
+  p.color_count = 2;
+  return p;
+}
+
+// The live-mic ambient field: slow embers that drift and rise off the mic
+// half. Negative gravity does the rising; low speeds keep it a murmur.
+fx::SpawnParams emberParams() {
+  fx::SpawnParams p;
+  p.spread = 4.0f;
+  p.speed_min = 3.0f;
+  p.speed_max = 14.0f;
+  p.life_min = 1.4f;
+  p.life_max = 2.8f;
+  p.size_min = 1.0f;
+  p.size_max = 2.0f;
+  p.drag = 0.90f;
+  p.gravity_y = -26.0f;
+  p.colors[0] = gfx::rgb565(255, 90, 50);
+  p.colors[1] = gfx::rgb565(255, 150, 60);
+  p.colors[2] = gfx::rgb565(180, 50, 30);
+  p.color_count = 3;
+  return p;
+}
+
+}  // namespace
+
 void TeamsScreen::begin() {
   muted_ = -1;
   camera_ = -1;
   mic_pending_ = false;
   cam_pending_ = false;
+  call_s_ = -1;
   timer_[0] = '\0';
+  mic_flip_ = 0;
+  cam_flip_ = 0;
+  ember_acc_ = 0.0f;
+  swirl_acc_ = 0.0f;
+  parts_.clear();
 }
 
 void TeamsScreen::prepare(int muted, int camera, bool mic_pending,
                           bool cam_pending, int call_s) {
+  // Confirmed flips only: both old and new state must be known. A flip queues
+  // until update() spends it, so a flip is never lost to frame ordering.
+  if (muted_ >= 0 && muted >= 0 && muted != muted_) mic_flip_ = muted ? -1 : 1;
+  if (camera_ >= 0 && camera >= 0 && camera != camera_)
+    cam_flip_ = camera ? 1 : -1;
   muted_ = muted;
   camera_ = camera;
   mic_pending_ = mic_pending;
   cam_pending_ = cam_pending;
+  call_s_ = call_s;
   if (call_s >= 0) {
     std::snprintf(timer_, sizeof(timer_), "%d:%02d", call_s / 60, call_s % 60);
   } else {
     timer_[0] = '\0';
   }
+}
+
+void TeamsScreen::update(float dt, core::Rng &rng) {
+  if (mic_flip_) {
+    parts_.configure(burstParams(true, mic_flip_));
+    parts_.setOrigin(MIC_CX, ICON_CY);
+    parts_.burst(mic_flip_ > 0 ? 90 : 36, mic_flip_ > 0 ? 1.0f : 0.55f, rng);
+    mic_flip_ = 0;
+  }
+  if (cam_flip_) {
+    parts_.configure(burstParams(false, cam_flip_));
+    parts_.setOrigin(CAM_CX, ICON_CY);
+    parts_.burst(cam_flip_ > 0 ? 60 : 24, cam_flip_ > 0 ? 0.8f : 0.5f, rng);
+    cam_flip_ = 0;
+  }
+  if (muted_ == 0) {
+    // Emission is metered in ember-per-second, accumulated against dt, so the
+    // field's density does not depend on the frame rate.
+    ember_acc_ += dt * 45.0f;
+    while (ember_acc_ >= 1.0f) {
+      ember_acc_ -= 1.0f;
+      parts_.configure(emberParams());
+      // Anywhere across the mic half's lower body, one ember at a time.
+      parts_.setOrigin(rng.range(16.0f, static_cast<float>(gfx::CX) - 16.0f),
+                       rng.range(220.0f, 300.0f));
+      parts_.emit(1, rng);
+    }
+  } else {
+    ember_acc_ = 0.0f;
+  }
+  if (mic_pending_ || cam_pending_) {
+    swirl_acc_ += dt * 40.0f;
+    while (swirl_acc_ >= 1.0f) {
+      swirl_acc_ -= 1.0f;
+      parts_.configure(swirlParams());
+      if (mic_pending_) {
+        parts_.setOrigin(MIC_CX, ICON_CY);
+        parts_.implode(1, 64.0f, rng);
+      }
+      if (cam_pending_) {
+        parts_.setOrigin(CAM_CX, ICON_CY);
+        parts_.implode(1, 64.0f, rng);
+      }
+    }
+  } else {
+    swirl_acc_ = 0.0f;
+  }
+  parts_.update(dt);
 }
 
 void TeamsScreen::renderBand(gfx::Surface &s) {
@@ -183,6 +327,28 @@ void TeamsScreen::renderBand(gfx::Surface &s) {
   if (timer_[0]) {
     gfx::drawTextCentered(s, gfx::fontSmall(), gfx::CX, 312, timer_, soft);
   }
+
+  // The call-length arc: one lap of the rim is an hour. The colour names the
+  // lap - white for the first hour, amber for the second, red beyond - and a
+  // finished lap stays behind the running one as a full ring, so hour two
+  // reads as "a whole white hour, plus this much amber".
+  if (call_s_ > 0) {
+    const int lap = call_s_ / 3600;
+    const float frac = static_cast<float>(call_s_ % 3600) / 3600.0f;
+    const uint16_t lap_col[3] = {gfx::rgb565(140, 140, 155),
+                                 gfx::rgb565(225, 150, 40),
+                                 gfx::rgb565(235, 70, 55)};
+    const uint16_t col = lap_col[lap > 2 ? 2 : lap];
+    if (lap > 0) {
+      const uint16_t prev = lap_col[lap - 1 > 2 ? 2 : lap - 1];
+      shell::drawArc(s, ARC_R, ARC_THICK, 0.0f, 1.0f, prev);
+    }
+    shell::drawArc(s, ARC_R, ARC_THICK, 0.0f, frac, col);
+  }
+
+  // Particles last, over everything: bursts, embers and the pending swirl are
+  // light, and light sits on top.
+  parts_.render(s);
 }
 
 }  // namespace views
