@@ -653,6 +653,13 @@ _announced = False
 _fallback_beats = 0
 PREFERRED_RETRY_BEATS = 20
 
+# The device deliberately holds a beat up to 1s waiting for events, so a
+# healthy beat is anything under about a second and a half. Past this, the
+# beat is paying for something - a slow resolve, a dying route - and it must
+# SAY so: the mDNS tax ran for hours because a 5.4s beat and a 150ms beat
+# were indistinguishable in every log and every test.
+SLOW_BEAT_S = 3.0
+
 
 def beat(token):
     global _host_idx, _fallback_beats
@@ -661,6 +668,7 @@ def beat(token):
         _host_idx = 0
         log(f"retrying preferred host {HOSTS[0]}")
     host = HOSTS[_host_idx]
+    t0 = time.monotonic()
     req = urllib.request.Request(
         f"http://{host}/beat",
         data=build_body(token),
@@ -691,6 +699,9 @@ def beat(token):
             _host_idx = (_host_idx + 1) % len(HOSTS)
             log(f"{host} unreachable; next try via {HOSTS[_host_idx]}")
         raise
+    took = time.monotonic() - t0
+    if took > SLOW_BEAT_S:
+        log(f"slow beat: {took:.1f}s via {host}")
     if _host_idx != 0:
         _fallback_beats += 1
     fields = parse_response(body)

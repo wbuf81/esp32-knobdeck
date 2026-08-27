@@ -308,6 +308,27 @@ class TestHostRotation(unittest.TestCase):
         self.assertEqual(m._host_idx, 0,
                          "sustained fallback success must retry HOSTS[0]")
 
+    def test_a_slow_beat_is_logged_and_a_normal_one_is_not(self):
+        # The mDNS tax was invisible for hours because every test and every
+        # log line is purely functional: a 5.4s beat and a 150ms beat look
+        # identical. Latency past the device's own hold must SAY something,
+        # or the next silent tax is just as silent.
+        m._host_idx = 0
+        lines = []
+        with self._succeed(), \
+             mock.patch.object(m, "log", side_effect=lines.append), \
+             mock.patch.object(m.time, "monotonic",
+                               side_effect=[0.0, m.SLOW_BEAT_S + 1.0]):
+            m.beat("t")
+        self.assertTrue(any("slow beat" in ln for ln in lines), lines)
+
+        lines.clear()
+        with self._succeed(), \
+             mock.patch.object(m, "log", side_effect=lines.append), \
+             mock.patch.object(m.time, "monotonic", side_effect=[0.0, 0.2]):
+            m.beat("t")
+        self.assertFalse(any("slow beat" in ln for ln in lines), lines)
+
     def test_a_dead_preferred_host_is_probed_not_camped_on(self):
         # The probe must cost one failure, not move in permanently: if the
         # preferred host is still gone, the failed probe rotates straight
