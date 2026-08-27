@@ -287,6 +287,38 @@ class TestHostRotation(unittest.TestCase):
                     m.beat("t")
             self.assertEqual(m._host_idx, 0)
 
+    def _succeed(self):
+        resp = mock.MagicMock()
+        resp.read.return_value = b"v=1\ntok=t\n"
+        resp.__enter__ = mock.Mock(return_value=resp)
+        resp.__exit__ = mock.Mock(return_value=False)
+        return mock.patch.object(m.urllib.request, "urlopen", return_value=resp)
+
+    def test_a_fallback_host_eventually_yields_back_to_the_preferred(self):
+        # The bug this test pins: a reflash's transient outage rotated the
+        # helper onto the mDNS name, and success was sticky - so one blip
+        # taxed every future beat with the device's ~5.4s resolve, felt as
+        # laggy taps and a Spotify screen ten seconds into a call. Sustained
+        # success on a fallback must retry the preferred host.
+        m._host_idx = 1
+        m._fallback_beats = 0
+        with self._succeed():
+            for _ in range(m.PREFERRED_RETRY_BEATS + 1):
+                m.beat("t")
+        self.assertEqual(m._host_idx, 0,
+                         "sustained fallback success must retry HOSTS[0]")
+
+    def test_a_dead_preferred_host_is_probed_not_camped_on(self):
+        # The probe must cost one failure, not move in permanently: if the
+        # preferred host is still gone, the failed probe rotates straight
+        # back to the fallback.
+        m._host_idx = 1
+        m._fallback_beats = m.PREFERRED_RETRY_BEATS
+        with self._fail_with(OSError("still down")):
+            with self.assertRaises(OSError):
+                m.beat("t")
+        self.assertEqual(m._host_idx, 1, "failed probe returns to the fallback")
+
 
 class TestTimeoutBudget(unittest.TestCase):
     def test_the_request_budget_exceeds_the_devices_hold(self):

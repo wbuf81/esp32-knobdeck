@@ -642,9 +642,24 @@ def parse_response(text):
 _host_idx = 0
 _announced = False
 
+# Successful beats served by a non-preferred host. Rotation exists for
+# outages, but success used to be sticky: one transient blip (a reflash
+# rebooting the device) demoted the helper onto the mDNS name FOREVER, and
+# the device answers .local in ~5.4s - every beat after the blip paid that
+# resolve, felt as laggy taps and a call the screen was slow to notice.
+# After this many good beats on a fallback, the preferred host gets another
+# try; if it is still gone, the failed probe rotates straight back and the
+# caller's backoff absorbs the single timeout.
+_fallback_beats = 0
+PREFERRED_RETRY_BEATS = 20
+
 
 def beat(token):
-    global _host_idx
+    global _host_idx, _fallback_beats
+    if _host_idx != 0 and _fallback_beats >= PREFERRED_RETRY_BEATS:
+        _fallback_beats = 0
+        _host_idx = 0
+        log(f"retrying preferred host {HOSTS[0]}")
     host = HOSTS[_host_idx]
     req = urllib.request.Request(
         f"http://{host}/beat",
@@ -676,6 +691,8 @@ def beat(token):
             _host_idx = (_host_idx + 1) % len(HOSTS)
             log(f"{host} unreachable; next try via {HOSTS[_host_idx]}")
         raise
+    if _host_idx != 0:
+        _fallback_beats += 1
     fields = parse_response(body)
 
     # The token must come back. Without this, anything that can answer on the
