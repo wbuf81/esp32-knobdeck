@@ -1,7 +1,8 @@
 # Knob Spotify Player
 
-A Spotify appliance — and a Teams meeting controller — for the **Waveshare
-ESP32-S3-Knob-Touch-LCD-1.8**: a 360×360 round touchscreen you turn.
+A Spotify appliance — and a Teams meeting controller — for the
+[**Waveshare ESP32-S3-Knob-Touch-LCD-1.8**](https://www.waveshare.com/wiki/ESP32-S3-Knob-Touch-LCD-1.8):
+a 360×360 round touchscreen you turn.
 
 <p align="center">
   <img src="assets/screens/cover-light.png" width="200" alt="Cover Light">

@@ -9,6 +9,12 @@ else here.
 **Every figure below was measured on the physical unit, or read off the
 manufacturer's schematic.** Where something is still unverified it says so.
 
+The schematic and Waveshare's own demo code are not redistributed here — they
+are the manufacturer's material, and both are published on the product wiki:
+<https://www.waveshare.com/wiki/ESP32-S3-Knob-Touch-LCD-1.8>. Anything below
+marked *schematic only* means it was read there and not yet confirmed with a
+meter.
+
 ---
 
 ## 1. The board

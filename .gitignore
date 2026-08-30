@@ -12,3 +12,9 @@ tools/axteams
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Waveshare's own demo code and schematic drawings. Kept locally as reference,
+# deliberately not redistributed here - they are the manufacturer's material and
+# they are published at the wiki linked in docs/BOARD_REFERENCE.md.
+ESP32-S3-Knob-Touch-LCD-1.8-Demo/
+ESP32-S3-Knob-Touch-LCD-1.8-schematic/
