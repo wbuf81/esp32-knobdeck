@@ -1,19 +1,32 @@
-# Knob Spotify Player
+# Knob
 
-A Spotify appliance — and a Teams meeting controller — for the
-[**Waveshare ESP32-S3-Knob-Touch-LCD-1.8**](https://www.waveshare.com/wiki/ESP32-S3-Knob-Touch-LCD-1.8):
-a 360×360 round touchscreen you turn.
+A desk controller for the
+[**Waveshare ESP32-S3-Knob-Touch-LCD-1.8**](https://www.waveshare.com/wiki/ESP32-S3-Knob-Touch-LCD-1.8) —
+a 360×360 round touchscreen you turn. It shows you what your computer is doing
+and lets you act on it without reaching for the keyboard.
 
 <p align="center">
-  <img src="assets/screens/cover-light.png" width="200" alt="Cover Light">
-  <img src="assets/screens/outrun.png" width="200" alt="Outrun">
-  <img src="assets/screens/teams-live.png" width="200" alt="Teams, mic live">
+  <img src="assets/screens/cover-light.png" width="200" alt="Music">
+  <img src="assets/screens/teams-live.png" width="200" alt="Meeting, mic live">
+  <img src="assets/screens/outrun.png" width="200" alt="Outrun theme">
 </p>
 
-Album art floats in 3D over a beat-reactive particle field, a ring around the
-bezel tracks the track, the knob is the volume, swiping up gets your playlists —
-and when a Teams call starts, the screen becomes two giant buttons you can hit
-without looking.
+It drives two things today, and the second one is the point:
+
+- **Music.** Album art floating in 3D over a beat-reactive particle field, a ring
+  around the bezel tracking the track, the knob as volume, swipe up for your
+  playlists.
+- **Meetings.** Start a Teams call and the screen switches itself: your **mic and
+  camera, live, as two giant buttons.** Red means you're on air, green means
+  you're not, and tapping a half toggles it — no hunting for a toolbar, no
+  wondering whether you're actually muted. Call ends, it goes back to the music.
+
+Neither is hardcoded as a mode. The device holds a small allowlisted protocol
+with a helper on your Mac: the helper reports state up, the device sends typed
+commands back down, and a *surface* is a screen plus a few fields on that wire.
+Teams was added as a second surface without touching the first — which is the
+best evidence that a third (a build status, a doorbell, a thermostat, whatever
+you can read on a Mac) is the same shape of work rather than a rewrite.
 
 **Every screenshot in this README is a real frame from the firmware**, rendered
 by `tools/capture_gallery.sh`. The desktop build runs the same source at the same
@@ -76,6 +89,25 @@ State comes from Teams' own accessibility tree (`tools/axteams`, an
 fallback. Toggles go back as allowlisted keystrokes. The knob still controls
 volume mid-call; swipe down returns to the meeting, swipe up leaves it for the
 music.
+
+### Adding your own surface
+
+The wire between Mac and device is deliberately dull, which is what makes it
+extensible. The helper POSTs state up as `key=value` lines; the device answers
+with commands drawn from a **fixed allowlist with typed, range-checked
+arguments** — never a string the Mac evaluates. So a new surface is four small
+edits, none of which touch the ones already there:
+
+1. **Report it.** Add a field in `build_body()` in `tools/mac_link.py`.
+2. **Receive it.** Parse that field into `MacState` in `src/net/MacLink.cpp`.
+3. **Draw it.** A view in `src/views/` with `prepare()` / `renderBand()`, plus a
+   `Screen` entry and a rule in `src/input/Route.cpp` for when it takes over.
+4. **Act on it** *(only if it needs to)*. Name a command in the device's response
+   and add its handler to `HANDLERS` in the helper.
+
+Teams mode is exactly those four edits. Anything your Mac can read — a build
+going red, a PR needing review, whoever is at the front door — fits the same
+shape.
 
 ## Everything else
 
@@ -261,7 +293,9 @@ via AppleScript, and Teams call/mic/camera state) and carries a small
 Any device→Mac command is a fixed allowlist with typed, range-checked arguments,
 never a string the Mac evaluates.
 
-It is entirely optional. Without it the knob is a Spotify player. With it, the
+It is entirely optional — without it the knob is a self-contained Spotify
+player, talking only to Spotify's API. But it is also what makes the knob more
+than a music remote: every surface beyond Spotify rides this wire. With it, the
 knob turns your Mac's volume, runs your meetings, and stops asking Spotify's API
 what is playing every two seconds — which is what exhausted the API quota during
 development.
