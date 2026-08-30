@@ -16,8 +16,19 @@
 //   KNOB_PARTICLES=0    disable the particle layer
 //   KNOB_BANDS=1        composite in 40-row bands, as the device does, so the
 //                       band path itself can be regression-tested on the host
-//   KNOB_SCREEN=list    preview the playlist browser instead of now-playing
-//   KNOB_POS=<f>        scroll position within that list, fractional
+//   KNOB_SCREEN=<name>  which screen to show:
+//                         player  now-playing over the effect (default)
+//                         list    the playlist browser
+//                         themes  the theme picker
+//                         teams   the meeting controller
+//                         daisy   the idle dog
+//                         confirm the save-to-liked ring
+//                         safe    the crash-loop screen
+//   KNOB_THEME=<0-6>    which effect drives the player view; see fx::ThemeId
+//   KNOB_POS=<f>        scroll position within a list, fractional
+//   KNOB_TEAMS=<m,c,s>  meeting state: muted, camera, seconds in call. Each of
+//                       muted and camera is -1 unknown / 0 / 1
+//   KNOB_TEAMS_PENDING=mic|cam   draw that half mid-toggle
 //   KNOB_WAV=<path>     drive the analyser from a WAV instead of the procedural
 //                       fallback, standing in for the device's microphone
 //   KNOB_SCALE=<n>      window magnification (default 2)
@@ -41,10 +52,16 @@
 #include "platform/desktop/WavMic.h"
 #include "art/Image.h"
 #include "core/PlaybackState.h"
+#include "fx/ThemePicker.h"
+#include "fx/Themes.h"
+#include "shell/ConfirmRing.h"
 #include "shell/ListView.h"
 #include "shell/NowPlaying.h"
 #include "shell/RadialShell.h"
 #include "views/CoverLight.h"
+#include "views/DaisyIdle.h"
+#include "views/SafeScreen.h"
+#include "views/TeamsScreen.h"
 
 namespace {
 
@@ -72,9 +89,13 @@ int main(int, char **) {
 
   gfx::Framebuffer fb;
   views::CoverLight view;
+  views::TeamsScreen teams;
+  views::DaisyIdle daisy;
+  views::SafeScreen safe;
   shell::RadialShell shell;
   shell::NowPlaying nowplaying;
   shell::ListView listview;
+  shell::ConfirmRing confirm;
 
   // Stand-in library, so the browser layout can be judged without a network.
   // Deliberately includes a name far too long for the disc and one with accents:
@@ -90,9 +111,44 @@ int main(int, char **) {
       "90s Rock Anthems",
   };
   const int kFakeCount = 8;
+
+  // One name per screen the device can show, so a still of any of them is one
+  // environment variable away. The device's own screen enum is in input/Route.h
+  // and is about routing; this is only about what to draw.
+  enum class Screen { Player, List, Themes, Teams, Daisy, Confirm, Safe };
   const char *screen_env = std::getenv("KNOB_SCREEN");
-  const bool list_mode = screen_env && std::strcmp(screen_env, "list") == 0;
-  view.setAmbient(list_mode);
+  Screen screen_mode = Screen::Player;
+  if (screen_env) {
+    if (!std::strcmp(screen_env, "list")) screen_mode = Screen::List;
+    else if (!std::strcmp(screen_env, "themes")) screen_mode = Screen::Themes;
+    else if (!std::strcmp(screen_env, "teams")) screen_mode = Screen::Teams;
+    else if (!std::strcmp(screen_env, "daisy")) screen_mode = Screen::Daisy;
+    else if (!std::strcmp(screen_env, "confirm")) screen_mode = Screen::Confirm;
+    else if (!std::strcmp(screen_env, "safe")) screen_mode = Screen::Safe;
+  }
+  const bool list_mode = screen_mode == Screen::List;
+  // A list screen dims the effect behind it, exactly as the device does.
+  view.setAmbient(list_mode || screen_mode == Screen::Themes);
+
+  // Theme names for the picker, and the theme actually driving the player.
+  const char *theme_rows[fx::ThemePicker::ROWS];
+  for (int i = 0; i < fx::ThemePicker::ROWS; ++i)
+    theme_rows[i] = fx::ThemePicker::rowName(i);
+  const int theme_n = envInt("KNOB_THEME", 0);
+  if (theme_n > 0 && theme_n < static_cast<int>(fx::ThemeId::Count))
+    view.setTheme(static_cast<fx::ThemeId>(theme_n));
+
+  // Meeting state, as the Mac helper would have reported it.
+  int teams_muted = 1, teams_cam = 0, teams_call_s = 754;
+  if (const char *t = std::getenv("KNOB_TEAMS"))
+    std::sscanf(t, "%d,%d,%d", &teams_muted, &teams_cam, &teams_call_s);
+  const char *teams_pending = std::getenv("KNOB_TEAMS_PENDING");
+  const bool mic_pending = teams_pending && !std::strcmp(teams_pending, "mic");
+  const bool cam_pending = teams_pending && !std::strcmp(teams_pending, "cam");
+
+  teams.begin();
+  daisy.begin();
+  safe.begin("Task watchdog reset", 3);
 
   // A stand-in track so the text layout can be judged without a network. The
   // accented name is deliberate: it is the case the Latin-1 font range exists
@@ -160,6 +216,46 @@ int main(int, char **) {
     while (list_pos > kFakeCount - 1) list_pos -= kFakeCount - 1;
     if (list_mode)
       listview.prepare(kFakeItems, kFakeCount, list_pos, "PLAYLISTS", false);
+    else if (screen_mode == Screen::Themes)
+      listview.prepare(theme_rows, fx::ThemePicker::ROWS, list_pos, "THEMES",
+                       false, nullptr, theme_n + 1);
+    else if (screen_mode == Screen::Confirm)
+      confirm.prepare(fake.title, list_pos - static_cast<int>(list_pos));
+
+    if (screen_mode == Screen::Teams) {
+      teams.prepare(teams_muted, teams_cam, mic_pending, cam_pending,
+                    teams_call_s);
+      teams.update(dt, rng);
+    }
+    if (screen_mode == Screen::Daisy) daisy.update(dt);
+
+    // One composite, whether it is handed the whole disc or one band of it.
+    // Written once rather than twice because the banded and full-frame paths
+    // must agree byte for byte, and two copies of a dispatch is exactly how
+    // they stop agreeing.
+    auto composite = [&](gfx::Surface &s) {
+      switch (screen_mode) {
+        case Screen::Teams:
+          teams.renderBand(s);  // owns every pixel; no shell over it
+          return;
+        case Screen::Daisy:
+          daisy.renderBand(s);
+          return;
+        case Screen::Safe:
+          safe.renderBand(s);
+          return;
+        default:
+          break;
+      }
+      view.renderBand(s);
+      shell.render(s, mod.progress01, view.tint(), 62, sim_ms, mod.bass);
+      if (screen_mode == Screen::List || screen_mode == Screen::Themes)
+        listview.render(s, view.tint());
+      else if (screen_mode == Screen::Confirm)
+        confirm.render(s, view.tint());
+      else
+        nowplaying.render(s, view.tint());
+    };
 
     if (use_bands) {
       for (int y = 0; y < gfx::H; y += band_h) {
@@ -168,10 +264,7 @@ int main(int, char **) {
         s.w = gfx::W;
         s.h = band_h;
         s.y0 = y;
-        view.renderBand(s);
-        shell.render(s, mod.progress01, view.tint(), 62, sim_ms, mod.bass);
-        if (list_mode) listview.render(s, view.tint());
-        else nowplaying.render(s, view.tint());
+        composite(s);
       }
     } else {
       gfx::Surface s;
@@ -179,10 +272,7 @@ int main(int, char **) {
       s.w = gfx::W;
       s.h = gfx::H;
       s.y0 = 0;
-      view.renderBand(s);
-      shell.render(s, mod.progress01, view.tint(), 62, sim_ms, mod.bass);
-      if (list_mode) listview.render(s, view.tint());
-      else nowplaying.render(s, view.tint());
+      composite(s);
     }
     view.endFrame();
 

@@ -1,43 +1,113 @@
 # Knob Spotify Player
 
-A Spotify appliance for the **Waveshare ESP32-S3-Knob-Touch-LCD-1.8** — a 360×360
-round touchscreen you turn. Album art floats in 3D over a beat-reactive particle
-field, a ring around the bezel tracks the track, the knob is the volume, and
-swiping up gets you your playlists.
+A Spotify appliance — and a Teams meeting controller — for the **Waveshare
+ESP32-S3-Knob-Touch-LCD-1.8**: a 360×360 round touchscreen you turn.
 
-Descended from [a M5Stack Spotify controller](../m5stackfirmware) — the state
-model, network task and Spotify client came across nearly unchanged. Everything
-you can see was rebuilt, because the two constraints that shaped the original's
-rendering (no PSRAM, no microphone) do not exist on this board.
+<p align="center">
+  <img src="assets/screens/cover-light.png" width="200" alt="Cover Light">
+  <img src="assets/screens/outrun.png" width="200" alt="Outrun">
+  <img src="assets/screens/teams-live.png" width="200" alt="Teams, mic live">
+</p>
 
-Also builds as a desktop app, rendering the identical source through SDL, which
-is where the visuals are actually developed.
+Album art floats in 3D over a beat-reactive particle field, a ring around the
+bezel tracks the track, the knob is the volume, swiping up gets your playlists —
+and when a Teams call starts, the screen becomes two giant buttons you can hit
+without looking.
 
-## What it does
+**Every screenshot in this README is a real frame from the firmware**, rendered
+by `tools/capture_gallery.sh`. The desktop build runs the same source at the same
+360×360 with simulated fixed-step time, so the gallery regenerates
+byte-identically unless the rendering actually changed. No mockups, no photos.
 
-- **Cover Light**, the one view so far: the album cover as a perspective-projected
-  quad with a rippling reflection, ~900 additive particle streaks coloured from
-  the artwork, expanding shockwave rings on the beat, and bloom over all of it.
-- **Beat reactivity** from the onboard microphone — real FFT, spectral-flux onset
-  detection and tempo tracking — with a procedural fallback that crossfades in
-  when the room goes quiet, so it never freezes.
-- **A playlist browser**: swipe up, turn the knob to scroll a centre-weighted
-  wheel, tap to open a playlist, tap a track to play it *in that playlist's
-  context*.
-- **Live album artwork**, downloaded into PSRAM and decoded by the chip's ROM
-  JPEG decoder. **No SD card required.**
-- Title, artist and timecodes, laid out against the *chord* of the disc.
+## The effects
+
+Seven, switchable from the device, all driven by one `Modulation` struct.
+
+<table>
+<tr>
+<td align="center"><img src="assets/screens/cover-light.png" width="150"><br><b>Cover Light</b><br><sub>comets from behind the album</sub></td>
+<td align="center"><img src="assets/screens/heartbeat.png" width="150"><br><b>Heartbeat</b><br><sub>lub-DUB, two rings per beat</sub></td>
+<td align="center"><img src="assets/screens/rain.png" width="150"><br><b>Rain</b><br><sub>falls; does not burst</sub></td>
+<td align="center"><img src="assets/screens/tetris.png" width="150"><br><b>Tetris</b><br><sub>pieces rotate on the beat</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="assets/screens/outrun.png" width="150"><br><b>Outrun</b><br><sub>grid runs at the viewer</sub></td>
+<td align="center"><img src="assets/screens/matrix.png" width="150"><br><b>Matrix</b><br><sub>glyphs scramble on onset</sub></td>
+<td align="center"><img src="assets/screens/record.png" width="150"><br><b>Record</b><br><sub>the cover as vinyl, spinning</sub></td>
+<td align="center"><img src="assets/screens/themes.png" width="150"><br><b>The picker</b><br><sub>plus Shuffle, which never<br>repeats the current one</sub></td>
+</tr>
+</table>
+
+A theme is **not** its own renderer. `fx::Particles` is ~38 KB and internal SRAM
+is already 56% used, so seven pools would be 266 KB and simply would not fit.
+`CoverLight` owns the expensive parts — pool, gradient table, bloom accumulator,
+cover quad — and a theme is a small object that steers them. Seven themes cost
+about what one does.
+
+## Teams mode
+
+When a call starts the device switches itself, and the panel stops being a
+gesture pad and becomes a **button surface**: mic left, camera right, each drawn
+in its live state. Tap a half to toggle it. The state display *is* the button, so
+there is nothing to memorise mid-meeting.
+
+<table>
+<tr>
+<td align="center"><img src="assets/screens/teams-live.png" width="170"><br><b>Live</b><br><sub>red, loud, embers rising</sub></td>
+<td align="center"><img src="assets/screens/teams-muted.png" width="170"><br><b>Muted</b><br><sub>calm green, slashed, still</sub></td>
+<td align="center"><img src="assets/screens/teams-pending.png" width="170"><br><b>Pending</b><br><sub>tapped, awaiting Teams' echo</sub></td>
+<td align="center"><img src="assets/screens/teams-unknown.png" width="170"><br><b>Unknown</b><br><sub>link down — a grey question</sub></td>
+</tr>
+</table>
+
+One colour grammar across both halves: **on-air is red, calm is green.** Three
+honesty rules, each with a pixel test behind it:
+
+- A live mic is unmissably different from a muted one — the whole screen is the
+  across-the-room glance before you speak.
+- **Unknown renders as unknown.** A grey question over a hot microphone beats a
+  green lie; this is the project's oldest invariant.
+- Pending dims and swirls rather than flipping. The display only changes when
+  Teams echoes the new truth.
+
+State comes from Teams' own accessibility tree (`tools/axteams`, an
+`AXManualAccessibility` unlock and a bounded walk), with a hardware-camera
+fallback. Toggles go back as allowlisted keystrokes. The knob still controls
+volume mid-call; swipe down returns to the meeting, swipe up leaves it for the
+music.
+
+## Everything else
+
+<table>
+<tr>
+<td align="center"><img src="assets/screens/playlists.png" width="170"><br><b>Playlist browser</b><br><sub>centre-weighted wheel, fitted<br>to the disc's chord</sub></td>
+<td align="center"><img src="assets/screens/confirm.png" width="170"><br><b>Save to Liked</b><br><sub>glide left or right to answer</sub></td>
+<td align="center"><img src="assets/screens/daisy.png" width="170"><br><b>Idle</b><br><sub>she wakes when you touch her</sub></td>
+<td align="center"><img src="assets/screens/safe-mode.png" width="170"><br><b>Safe mode</b><br><sub>three crashes in a row and<br>it stops digging</sub></td>
+</tr>
+</table>
+
+- **Live album artwork** downloaded into PSRAM and decoded by the chip's ROM JPEG
+  decoder. No SD card required.
+- **Beat reactivity** — real FFT, spectral-flux onset detection and tempo
+  tracking — with a procedural fallback that crossfades in when the room goes
+  quiet, so it never freezes. *(The board's mic is not wired yet; the fallback is
+  what actually runs on hardware today.)*
+- **Screen dim and sleep**, driven by playback and by the Mac's lock state.
+- **A watchdog and a crash policy.** Three abnormal resets in a row boots into
+  safe mode with network and effects off, and it forgives the streak only after a
+  run long enough to count as real.
 
 ## Controls
 
-| Gesture | Player | Browser |
-|---|---|---|
-| Turn knob | volume, with a haptic tick per detent | scroll the wheel |
-| Tap centre | play / pause | open playlist / play track |
-| Swipe left / right | previous / next track | — |
-| Swipe up | open the playlist browser | — |
-| Swipe down | — | back a level |
-| Long press | save to Liked Songs | — |
+| Gesture | Player | Browser | Meeting |
+|---|---|---|---|
+| Turn knob | volume, haptic tick per detent | scroll the wheel | volume |
+| Tap | play / pause | open playlist / play track | toggle that half |
+| Swipe left / right | previous / next track | — | — |
+| Swipe up | playlist browser | — | leave, back to music |
+| Swipe down | queue *(the meeting, if in a call)* | back a level | — |
+| Long press | save to Liked Songs | — | — |
 
 The knob's *press* is not wired to the ESP32-S3 — see
 [docs/BOARD_REFERENCE.md](docs/BOARD_REFERENCE.md) §2 — so selection is a tap.
@@ -46,7 +116,7 @@ The knob's *press* is not wired to the ESP32-S3 — see
 
 ```sh
 brew install platformio sdl2 pkg-config     # one time, macOS
-export HOMEBREW_PREFIX=/opt/homebrew        # Apple Silicon
+export HOMEBREW_PREFIX=/opt/homebrew        # Apple Silicon, every pio command
 
 # Spotify credentials. Run in a real terminal: it prompts for the sensitive
 # values itself and writes src/config/secrets.h mode 0600.
@@ -75,21 +145,26 @@ save an afternoon:
 
 ## The desktop build
 
-Not a mockup — the same source, rendering at the real 360×360.
+Not a mockup — the same source, rendering at the real 360×360, and where the
+visuals are actually developed.
 
 ```sh
 pio run -e native && ./.pio/build/native/program
+tools/capture_gallery.sh          # regenerate every image in this README
 ```
 
 | Variable | Effect |
 |---|---|
+| `KNOB_SCREEN=<name>` | `player` (default), `list`, `themes`, `teams`, `daisy`, `confirm`, `safe` |
+| `KNOB_THEME=<0-6>` | which effect drives the player view |
+| `KNOB_TEAMS=<m,c,s>` | meeting state: muted, camera, seconds in call (−1 = unknown) |
+| `KNOB_TEAMS_PENDING=mic\|cam` | draw that half mid-toggle |
 | `KNOB_HEADLESS=1` | no window; render, dump, exit |
 | `KNOB_EXIT_MS=<ms>` | quit after this much *simulated* time |
 | `KNOB_DUMP=<path>` | write the framebuffer as a 24-bit BMP |
-| `KNOB_BANDS=1` | composite in 20-row bands, exactly as the device does |
+| `KNOB_BANDS=1` | composite in bands, exactly as the device does |
 | `KNOB_WAV=<path>` | drive the analyser from a WAV instead of the fallback |
-| `KNOB_SCREEN=list` | preview the playlist browser |
-| `KNOB_POS=<f>` | scroll position within it, fractional |
+| `KNOB_POS=<f>` | scroll position within a list, fractional |
 | `KNOB_SEED=<n>` | track seed, which sets hue and tempo |
 | `KNOB_NOCOVER=1` | the no-artwork path |
 | `KNOB_PARTICLES=0` | disable the particle layer |
@@ -100,13 +175,14 @@ That is what the pixel assertions rest on.
 
 ### The invariant worth knowing about
 
-`KNOB_BANDS=1` renders the way the device does — 18 bands composited
-separately — and the result must be **byte-identical** to a single full frame.
-That single assertion caught three separate clipping bugs that were invisible
-otherwise, and it is what makes the desktop a trustworthy stand-in for the panel.
+`KNOB_BANDS=1` renders the way the device does — bands composited separately —
+and the result must be **byte-identical** to a single full frame. That one
+assertion caught three separate clipping bugs that were invisible otherwise, and
+it is what makes the desktop a trustworthy stand-in for the panel.
 
 ```sh
-pio test -e test        # 104 host unit tests
+pio test -e test                                                  # 302 host tests
+cd tools && python3 -m unittest discover -s . -p 'test_*.py'      #  84 helper tests
 ```
 
 ## Architecture
@@ -114,18 +190,19 @@ pio test -e test        # 104 host unit tests
 ```
 src/
   core/       AppState, PlaybackState, merge policy, wrap-safe Deadline,
-              deterministic Rng, clamped FrameClock, locked single-write logger
-  net/        NetWorker (FreeRTOS task, core 0), WifiLink, HTTP
+              deterministic Rng, clamped FrameClock, backlight, crash policy
+  net/        NetWorker (FreeRTOS task, core 0), WifiLink, HTTP, HostLink
   spotify/    auth refresh, polling, commands, playlist/track listings
   art/        PSRAM cover cache, ROM JPEG decode, palette extraction
   audio/      mic capture, 512-point FFT, band energy, onset, tempo,
               the Modulation bus and its procedural fallback
   gfx/        Surface, blend ops, band bloom, Quad3D, bitmap text
-  fx/         particle field
-  views/      Cover Light
-  shell/      radial rings, now-playing text, the wheel list
-  input/      PCNT encoder, CST816 touch, gestures, DRV2605 haptics
+  fx/         particle pool, the seven themes, the theme picker
+  views/      Cover Light, the meeting controller, the idle dog, safe screen
+  shell/      radial rings, now-playing text, the wheel list, confirm ring
+  input/      PCNT encoder, CST816 touch, gestures, routing, DRV2605 haptics
   platform/   esp32/ and desktop/ behind the same interfaces
+tools/        the Mac helper, the Teams accessibility reader, the gallery
 ```
 
 Three ideas do most of the work:
@@ -150,7 +227,7 @@ dithering the table *index* rather than the colour breaks it up for a single add
 
 ## Performance
 
-~20 fps at 360×360 with everything running, measured on hardware:
+Cover Light, the heaviest view, measured on hardware at ~20 fps:
 
 | Pass | ms/frame |
 |---|---|
@@ -163,52 +240,41 @@ dithering the table *index* rather than the colour breaks it up for a single add
 | byte-swap + DMA | 3.2 |
 | text | 0.9 |
 
+Screens without the cover quad and the bloom chain run far faster — the idle and
+meeting screens sit above 100 fps. The serial status line carries per-pass timers
+permanently, and it is the source of truth; the table above is a snapshot.
+
 Getting there took six rounds of measurement, and **every guess made before
-measuring was wrong at least once**. The details, and the numbers that constrain
-any design on this board, are in
+measuring was wrong at least once, in both directions**. The Record backdrop was
+23.8 ms before it was 8.2 ms. The Mac helper's "essentially zero" CPU was 1.6%.
+The details, and the numbers that constrain any design on this board, are in
 [docs/BOARD_REFERENCE.md](docs/BOARD_REFERENCE.md) — written to be copied into
 another project as-is.
 
-## Not done yet
-
-- Only one view. The ancestor had eight.
-- No setup portal, so credentials come from a compiled `secrets.h`.
-- Microphone reactivity is built and tested but not yet wired to the I²S pins.
-- No screen dim/sleep, battery reporting, or watchdog.
-- Text is Latin-1; CJK renders a fallback glyph.
-
-## License
-
-MIT.
-
 ## The Mac helper (optional)
 
-`HostLink` on the device has always listened for a Mac to report itself; this is
-the sender. It carries host state up — lock state, computer name, system volume,
-and Spotify's own now-playing read locally via AppleScript — and carries a small
-allowlisted command back down, currently just "set the system output volume".
+`tools/mac_link.py` — stdlib only, runs as a LaunchAgent. It carries host state
+up (lock state, computer name, system volume, Spotify's now-playing read locally
+via AppleScript, and Teams call/mic/camera state) and carries a small
+**allowlisted** command back down: set the volume, toggle mute, toggle camera.
+Any device→Mac command is a fixed allowlist with typed, range-checked arguments,
+never a string the Mac evaluates.
 
-It is entirely optional. Without it the knob is exactly what it was: a Spotify
-player. With it, the knob can turn your Mac's volume, and it stops asking
-Spotify's API what is playing every two seconds — which is what exhausted the
-API quota during development.
-
-**Set it up:**
+It is entirely optional. Without it the knob is a Spotify player. With it, the
+knob turns your Mac's volume, runs your meetings, and stops asking Spotify's API
+what is playing every two seconds — which is what exhausted the API quota during
+development.
 
 ```sh
 # 1. A shared secret, in two places. Never commit either.
 python3 -c "import secrets; print(secrets.token_urlsafe(24))" > ~/.config/knob-spotify/token
 chmod 600 ~/.config/knob-spotify/token
-#    Then add the SAME value to src/config/secrets.h as:
-#      #define MAC_LINK_TOKEN "..."
-#    and reflash. An empty token disables the command channel entirely.
+#    Then add the SAME value to src/config/secrets.h as MAC_LINK_TOKEN and
+#    reflash. An empty token disables the command channel entirely.
 
 # 2. Run it in the foreground first. A background process is the wrong place to
 #    discover a typo.
 KNOB_HOST=<device-ip> /usr/bin/python3 tools/mac_link.py
-#    Expected: "starting, host=..." then silence. Silence is correct - a held
-#    request that returns no command produces no output. Turn the knob with
-#    nothing playing and you should see "output volume -> N".
 
 # 3. Install it at login.
 sed -e "s|REPLACE_WITH_ABSOLUTE_PATH|$PWD|" \
@@ -219,22 +285,30 @@ launchctl load ~/Library/LaunchAgents/com.knobspotify.maclink.plist
 tail -f /tmp/knob-maclink.log
 ```
 
-**Remove it:**
+Two traps worth knowing, both of which cost an afternoon:
 
-```sh
-launchctl unload ~/Library/LaunchAgents/com.knobspotify.maclink.plist
-rm ~/Library/LaunchAgents/com.knobspotify.maclink.plist
-```
-
-Killing the helper loses knob-to-Mac control and nothing else. Your volume, your
-mic and your music are untouched — the helper only ever acts when the device
-asks it to, and it asks for one thing.
+- **Give `KNOB_HOST` the IP first**, name second. The device's mDNS answers in
+  ~5.4 s and *succeeds*, so a `.local`-first host list silently taxes every beat
+  with no error and no log.
+- **macOS TCC grants bind to the binary's signature.** Every rebuild of a
+  compiled helper voids them silently while `AXIsProcessTrusted()` still returns
+  true; after a rebuild you must remove and re-add the row, not toggle it.
 
 Measured cost while running: **0.4% CPU, ~25 MB**. It spends almost all its life
-asleep on a socket read the device holds open, which is cheaper than a fast
-heartbeat would be. The first version measured 1.6% because it spawned four or
-five processes a second building the body; the readers are now cached and
-combined.
+asleep on a socket read the device holds open.
 
-macOS will likely prompt once for Automation permission so the helper can talk
-to Spotify. That is expected.
+## Not done yet
+
+- The board's microphone is not wired to I²S, so beat reactivity runs on the
+  procedural fallback on hardware. The FFT, onset and tempo code is built and
+  tested.
+- No setup portal, so credentials come from a compiled `secrets.h`.
+- `axteams` matches English Teams labels only.
+- Text is Latin-1; CJK renders a fallback glyph.
+
+## License
+
+MIT. Descended from an M5Stack Spotify controller — the state model, network task
+and Spotify client came across nearly unchanged. Everything you can see was
+rebuilt, because the two constraints that shaped the original's rendering (no
+PSRAM, no microphone) do not exist on this board.
