@@ -8,3 +8,7 @@ src/config/secrets.h
 tools/knobhud
 tools/avstate
 tools/axteams
+
+# Python bytecode
+__pycache__/
+*.pyc
